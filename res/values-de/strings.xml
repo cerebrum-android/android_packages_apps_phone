@@ -719,12 +719,11 @@
     <string name="description_target_decline" msgid="4789834364389731957">"Ablehnen"</string>
     <string name="voicemail_notification_vibrate_when_title" msgid="8361970092063604886">"Vibration"</string>
     <string name="voicemail_notification_vibarte_when_dialog_title" msgid="5739583146522136440">"Vibration"</string>
+    <string name="perm_change_mobile_network">Mobilfunkstandard wechseln (2G/3G)</string>
+    <string name="perm_change_mobile_network_desc">Anwendungen mit dieser Berechtigung können jederzeit zwischen 2G- und 3G-Netz wechseln. 3G ist schneller, verbraucht mehr Batterieladung und kann teurer sein</string>
   <string-array name="voicemail_notification_vibrate_when_entries">
     <item msgid="468237575962916558">"Immer"</item>
     <item msgid="1595097872875714252">"Nur im Lautlos-Modus"</item>
     <item msgid="1458182414036878616">"Nie"</item>
-    <string name="perm_change_mobile_network">Mobilfunkstandard wechseln (2G/3G)</string>
-    <string name="perm_change_mobile_network_desc">Anwendungen mit dieser Berechtigung können jederzeit zwischen 2G- und 3G-Netz wechseln. 3G ist schneller, verbraucht mehr Batterieladung und kann teurer sein</string>
-
   </string-array>
 </resources>

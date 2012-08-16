@@ -715,12 +715,11 @@
     <string name="description_target_decline" msgid="4789834364389731957">"Refuser"</string>
     <string name="voicemail_notification_vibrate_when_title" msgid="8361970092063604886">"Vibreur"</string>
     <string name="voicemail_notification_vibarte_when_dialog_title" msgid="5739583146522136440">"Vibreur"</string>
+    <string name="perm_change_mobile_network">Changer la technologie réseau (2G/3G)</string>
+    <string name="perm_change_mobile_network_desc">Les applications possédant cette permission peuvent à chaque instant changer entre les technologies 2G et 3G. La 3G est plus rapide, consomme plus de batterie, et peut également vous coûter plus</string>
   <string-array name="voicemail_notification_vibrate_when_entries">
     <item msgid="468237575962916558">"Toujours"</item>
     <item msgid="1595097872875714252">"En mode silencieux"</item>
     <item msgid="1458182414036878616">"Jamais"</item>
-    <string name="perm_change_mobile_network">Changer la technologie réseau (2G/3G)</string>
-    <string name="perm_change_mobile_network_desc">Les applications possédant cette permission peuvent à chaque instant changer entre les technologies 2G et 3G. La 3G est plus rapide, consomme plus de batterie, et peut également vous coûter plus</string>
-
   </string-array>
 </resources>
