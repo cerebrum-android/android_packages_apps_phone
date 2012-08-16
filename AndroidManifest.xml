@@ -484,6 +484,14 @@
                 android:theme="@android:style/Theme.Holo.NoActionBar"
                 android:configChanges="orientation|screenSize|keyboardHidden">
         </activity>
+        
+        <receiver android:name="com.android.phone.PhoneToggler" android:permission="com.android.phone.CHANGE_NETWORK_MODE">
+            <intent-filter>
+                <action android:name="com.android.internal.telephony.REQUEST_NETWORK_MODE" />
+                <action android:name="com.android.internal.telephony.MODIFY_NETWORK_MODE" />
+            </intent-filter>
+        </receiver>
+
 
         <activity android:name="RespondViaSmsManager$Settings"
                 android:label="@string/respond_via_sms_setting_title"
