@@ -42,7 +42,9 @@
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.INTERNAL_SYSTEM_WINDOW" />
     <uses-permission android:name="android.permission.ADD_SYSTEM_SERVICE" />
@@ -79,6 +81,7 @@
     <uses-permission android:name="android.permission.PERFORM_CDMA_PROVISIONING" />
     <uses-permission android:name="android.permission.USE_SIP" />
     <uses-permission android:name="android.permission.REBOOT" />
+    <uses-permission android:name="android.permission.UPDATE_LOCK" />
     <uses-permission android:name="com.android.smspush.WAPPUSH_MANAGER_BIND" />
 
     <!-- This tells the activity manager to not delay any of our activity
@@ -117,6 +120,7 @@
         <activity android:name="SimContacts"
             android:label="@string/simContacts_title"
             android:theme="@style/SimImportTheme"
+            android:screenOrientation="portrait"
             android:icon="@mipmap/ic_launcher_contacts">
 
             <intent-filter>
@@ -135,8 +139,9 @@
         </activity>
 
         <activity android:name="OutgoingCallBroadcaster"
-                android:theme="@android:style/Theme.NoDisplay"
+                android:theme="@style/OutgoingCallBroadcasterTheme"
                 android:permission="android.permission.CALL_PHONE"
+                android:screenOrientation="portrait"
                 android:configChanges="orientation|screenSize|keyboardHidden">
             <!-- CALL action intent filters, for the various ways
                  of initiating an outgoing call. -->
@@ -253,9 +258,9 @@
 
         <!-- "Mobile network settings" screen, used on both
              non-voice-capable tablets and regular phone devices. -->
-        <activity android:name="Settings"
-                android:label="@string/settings_label"
-                android:theme="@style/Theme.Settings">
+        <activity android:name="MobileNetworkSettings"
+            android:label="@string/settings_label"
+            android:theme="@style/Theme.Settings">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.MAIN" />
@@ -263,6 +268,9 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <activity-alias android:name="Settings"
+            android:targetActivity="MobileNetworkSettings" />
 
         <!-- networks setting -->
         <!-- service to handle network query requests sent to RIL -->
@@ -394,7 +402,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Data usage and throttling setting -->
+        <!-- Data usage and throttling setting for ThrottleService in framework. -->
         <activity android:name="DataUsage"
                 android:label="@string/throttle_data_usage"
                 android:theme="@android:style/Theme.Holo.DialogWhenLarge">
@@ -443,6 +451,9 @@
         <service android:name="EmergencyCallbackModeService">
         </service>
 
+        <!-- service to dump telephony information -->
+        <service android:name="TelephonyDebugService" />
+
         <activity android:name="EmergencyCallbackModeExitDialog"
             android:excludeFromRecents="true"
             android:label="@string/ecm_exit_dialog"
@@ -481,17 +492,10 @@
                 android:uiOptions="splitActionBarWhenNarrow">
         </activity>
         <activity android:name=".SipCallOptionHandler"
-                android:theme="@android:style/Theme.Holo.NoActionBar"
+                android:theme="@style/SipCallOptionHandlerTheme"
+                android:screenOrientation="portrait"
                 android:configChanges="orientation|screenSize|keyboardHidden">
         </activity>
-        
-        <receiver android:name="com.android.phone.PhoneToggler" android:permission="com.android.phone.CHANGE_NETWORK_MODE">
-            <intent-filter>
-                <action android:name="com.android.internal.telephony.REQUEST_NETWORK_MODE" />
-                <action android:name="com.android.internal.telephony.MODIFY_NETWORK_MODE" />
-            </intent-filter>
-        </receiver>
-
 
         <activity android:name="RespondViaSmsManager$Settings"
                 android:label="@string/respond_via_sms_setting_title"
@@ -501,6 +505,21 @@
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
         </activity>
+
+        <receiver android:name="CallerInfoCacheUpdateReceiver">
+            <intent-filter>
+                <action android:name="com.android.phone.UPDATE_CALLER_INFO_CACHE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- BroadcastReceiver for receiving Intents from Notification mechanism. -->
+        <receiver android:name="PhoneApp$NotificationBroadcastReceiver" exported="false">
+            <intent-filter>
+                <action android:name="com.android.phone.ACTION_HANG_UP_ONGOING_CALL" />
+                <action android:name="com.android.phone.ACTION_CALL_BACK_FROM_NOTIFICATION" />
+                <action android:name="com.android.phone.ACTION_SEND_SMS_FROM_NOTIFICATION" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>
