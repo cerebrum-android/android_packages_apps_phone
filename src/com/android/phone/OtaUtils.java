@@ -17,6 +17,7 @@
 package com.android.phone;
 
 import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.TelephonyCapabilities;
 import com.android.internal.telephony.TelephonyProperties;
 import com.android.phone.OtaUtils.CdmaOtaInCallScreenUiState.State;
 
@@ -60,7 +61,7 @@ import android.widget.ToggleButton;
  */
 public class OtaUtils {
     private static final String LOG_TAG = "OtaUtils";
-    private static final boolean DBG = true;
+    private static final boolean DBG = false;
 
     public static final int OTA_SHOW_ACTIVATION_SCREEN_OFF = 0;
     public static final int OTA_SHOW_ACTIVATION_SCREEN_ON = 1;
@@ -141,7 +142,6 @@ public class OtaUtils {
     private Context mContext;
     private PhoneApp mApplication;
     private OtaWidgetData mOtaWidgetData;
-    private ViewGroup mInCallPanel;  // Container for the CallCard
     private ViewGroup mInCallTouchUi;  // UI controls for regular calls
     private CallCard mCallCard;
 
@@ -230,9 +230,7 @@ public class OtaUtils {
      * InCallScreen.onResume().)
      */
     public void updateUiWidgets(InCallScreen inCallScreen,
-                                ViewGroup inCallPanel,
-                                ViewGroup inCallTouchUi,
-                                CallCard callCard) {
+            ViewGroup inCallTouchUi, CallCard callCard) {
         if (DBG) log("updateUiWidgets()...  mInCallScreen = " + mInCallScreen);
 
         if (!mInteractive) {
@@ -245,7 +243,6 @@ public class OtaUtils {
         }
 
         mInCallScreen = inCallScreen;
-        mInCallPanel = inCallPanel;
         mInCallTouchUi = inCallTouchUi;
         mCallCard = callCard;
         mOtaWidgetData = new OtaWidgetData();
@@ -269,7 +266,6 @@ public class OtaUtils {
      */
     public void clearUiWidgets() {
         mInCallScreen = null;
-        mInCallPanel = null;
         mInCallTouchUi = null;
         mCallCard = null;
         mOtaWidgetData = null;
@@ -519,7 +515,7 @@ public class OtaUtils {
         // the magic OTASP numbers.
         String number;
         try {
-            number = CallController.getInitialNumber(intent);
+            number = PhoneUtils.getInitialNumber(intent);
         } catch (PhoneUtils.VoiceMailNumberMissingException ex) {
             // This was presumably a "voicemail:" intent, so it's
             // obviously not an OTASP number.
@@ -884,12 +880,6 @@ public class OtaUtils {
         if (mApplication.cdmaOtaScreenState.otaspResultCodePendingIntent == null) {
             Log.w(LOG_TAG, "updateNonInteractiveOtaSuccessFailure: "
                   + "null otaspResultCodePendingIntent!");
-            // This *should* never happen, since SetupWizard always passes this
-            // PendingIntent along with the ACTION_PERFORM_CDMA_PROVISIONING
-            // intent.
-            // (But if this happens it's not a fatal error, it just means that
-            // our original caller has no way of finding out whether the OTASP
-            // call ultimately failed or succeeded...)
             return;
         }
 
@@ -1122,9 +1112,12 @@ public class OtaUtils {
             return;
         }
 
-        if (mInCallPanel != null) mInCallPanel.setVisibility(View.GONE);
         if (mInCallTouchUi != null) mInCallTouchUi.setVisibility(View.GONE);
-        if (mCallCard != null) mCallCard.hideCallCardElements();
+        if (mCallCard != null) {
+            mCallCard.setVisibility(View.GONE);
+            // TODO: try removing this.
+            mCallCard.hideCallCardElements();
+        }
 
         mOtaWidgetData.otaTitle.setText(R.string.ota_title_activate);
         mOtaWidgetData.otaTextActivate.setVisibility(View.GONE);
@@ -1178,11 +1171,11 @@ public class OtaUtils {
         if ((mInCallScreen != null) && mInCallScreen.isForegroundActivity()) {
             if (DBG) log("otaShowProperScreen(): InCallScreen in foreground, currentstate = "
                     + mApplication.cdmaOtaScreenState.otaScreenState);
-            if (mInCallPanel != null) {
-                mInCallPanel.setVisibility(View.GONE);
-            }
             if (mInCallTouchUi != null) {
                 mInCallTouchUi.setVisibility(View.GONE);
+            }
+            if (mCallCard != null) {
+                mCallCard.setVisibility(View.GONE);
             }
             if (mApplication.cdmaOtaScreenState.otaScreenState
                     == CdmaOtaScreenState.OtaScreenState.OTA_STATUS_ACTIVATION) {
@@ -1458,9 +1451,11 @@ public class OtaUtils {
         mApplication.cdmaOtaInCallScreenUiState.state = State.UNDEFINED;
 
         if (mInteractive && (mOtaWidgetData != null)) {
-            if (mInCallPanel != null) mInCallPanel.setVisibility(View.VISIBLE);
             if (mInCallTouchUi != null) mInCallTouchUi.setVisibility(View.VISIBLE);
-            if (mCallCard != null) mCallCard.hideCallCardElements();
+            if (mCallCard != null) {
+                mCallCard.setVisibility(View.VISIBLE);
+                mCallCard.hideCallCardElements();
+            }
 
             // Free resources from the DTMFTwelveKeyDialer instance we created
             // in initOtaInCallScreen().
@@ -1572,16 +1567,18 @@ public class OtaUtils {
             otaScreenState = OtaScreenState.OTA_STATUS_UNDEFINED;
         }
 
-        // PendingIntent used to report an OTASP result status code back
-        // to our caller.
-        //
-        // Our caller (presumably SetupWizard) creates this PendingIntent,
-        // pointing back at itself, and passes it along as an extra with the
-        // ACTION_PERFORM_CDMA_PROVISIONING intent.  Then, when there's an
-        // OTASP result to report, we send that PendingIntent back, adding an
-        // extra called EXTRA_OTASP_RESULT_CODE to indicate the result.
-        //
-        // Possible result values are the OTASP_RESULT_* constants.
+        /**
+         * {@link PendingIntent} used to report an OTASP result status code
+         * back to our caller. Can be null.
+         *
+         * Our caller (presumably SetupWizard) may create this PendingIntent,
+         * pointing back at itself, and passes it along as an extra with the
+         * ACTION_PERFORM_CDMA_PROVISIONING intent.  Then, when there's an
+         * OTASP result to report, we send that PendingIntent back, adding an
+         * extra called EXTRA_OTASP_RESULT_CODE to indicate the result.
+         *
+         * Possible result values are the OTASP_RESULT_* constants.
+         */
         public PendingIntent otaspResultCodePendingIntent;
     }
 

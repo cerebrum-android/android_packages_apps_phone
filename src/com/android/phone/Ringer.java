@@ -29,7 +29,9 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.os.SystemVibrator;
 import android.os.Vibrator;
+import android.provider.Settings;
 import android.util.Log;
 
 import com.android.internal.telephony.Phone;
@@ -51,10 +53,10 @@ public class Ringer {
     private static Ringer sInstance;
 
     // Uri for the ringtone.
-    Uri mCustomRingtoneUri;
+    Uri mCustomRingtoneUri = Settings.System.DEFAULT_RINGTONE_URI;
 
     Ringtone mRingtone;
-    Vibrator mVibrator = new Vibrator();
+    Vibrator mVibrator;
     IPowerManager mPowerManager;
     volatile boolean mContinueVibrating;
     VibratorThread mVibratorThread;
@@ -83,6 +85,9 @@ public class Ringer {
     private Ringer(Context context) {
         mContext = context;
         mPowerManager = IPowerManager.Stub.asInterface(ServiceManager.getService(Context.POWER_SERVICE));
+        // We don't rely on getSystemService(Context.VIBRATOR_SERVICE) to make sure this
+        // vibrator object will be isolated from others.
+        mVibrator = new SystemVibrator();
     }
 
     /**
@@ -146,9 +151,9 @@ public class Ringer {
             try {
                 if (PhoneApp.getInstance().showBluetoothIndication()) {
                     mPowerManager.setAttentionLight(true, 0x000000ff);
-		} else {
+                } else {
                     mPowerManager.setAttentionLight(true, 0x00ffffff);
-		}
+                }
             } catch (RemoteException ex) {
                 // the other end of this binder call is in the system process.
             }
@@ -195,7 +200,12 @@ public class Ringer {
 
     boolean shouldVibrate() {
         AudioManager audioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
-        return audioManager.shouldVibrate(AudioManager.VIBRATE_TYPE_RINGER);
+        int ringerMode = audioManager.getRingerMode();
+        if (CallFeaturesSetting.getVibrateWhenRinging(mContext)) {
+            return ringerMode != AudioManager.RINGER_MODE_SILENT;
+        } else {
+            return ringerMode == AudioManager.RINGER_MODE_VIBRATE;
+        }
     }
 
     /**

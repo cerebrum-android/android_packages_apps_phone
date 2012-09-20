@@ -23,18 +23,17 @@ import android.os.Message;
 import android.provider.Settings;
 import android.telephony.PhoneNumberUtils;
 import android.text.Editable;
-import android.text.Spannable;
 import android.text.method.DialerKeyListener;
-import android.text.method.MovementMethod;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewStub;
 import android.widget.EditText;
-import android.widget.TextView;
 
 import com.android.internal.telephony.CallManager;
 import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.TelephonyCapabilities;
 
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -55,7 +54,7 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
 
     private CallManager mCM;
     private ToneGenerator mToneGenerator;
-    private Object mToneGeneratorLock = new Object();
+    private final Object mToneGeneratorLock = new Object();
 
     // indicate if we want to enable the local tone playback.
     private boolean mLocalToneEnabled;
@@ -110,16 +109,35 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
         mDisplayMap.put(R.id.star, '*');
     }
 
-    // EditText field used to display the DTMF digits sent so far.
-    // Note this is null in some modes (like during the CDMA OTA call,
-    // where there's no onscreen "digits" display.)
+    /** EditText field used to display the DTMF digits sent so far.
+        Note this is null in some modes (like during the CDMA OTA call,
+        where there's no onscreen "digits" display.) */
     private EditText mDialpadDigits;
 
     // InCallScreen reference.
     private InCallScreen mInCallScreen;
 
-    // The DTMFTwelveKeyDialerView we use to display the dialpad.
+    /**
+     * The DTMFTwelveKeyDialerView we use to display the dialpad.
+     *
+     * Only one of mDialerView or mDialerStub will have a legitimate object; the other one will be
+     * null at that moment. Either of following scenarios will occur:
+     *
+     * - If the constructor with {@link DTMFTwelveKeyDialerView} is called, mDialerView will
+     *   obtain that object, and mDialerStub will be null. mDialerStub won't be used in this case.
+     *
+     * - If the constructor with {@link ViewStub} is called, mDialerView will be null at that
+     *   moment, and mDialerStub will obtain the ViewStub object.
+     *   When the dialer is required by the user (i.e. until {@link #openDialer(boolean)} being
+     *   called), mDialerStub will inflate the dialer, and make mDialerStub itself null.
+     *   mDialerStub won't be used afterward.
+     */
     private DTMFTwelveKeyDialerView mDialerView;
+
+    /**
+     * {@link ViewStub} holding {@link DTMFTwelveKeyDialerView}. See the comments for mDialerView.
+     */
+    private ViewStub mDialerStub;
 
     // KeyListener used with the "dialpad digits" EditText widget.
     private DTMFKeyListener mDialerKeyListener;
@@ -316,7 +334,7 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
     /**
      * Our own handler to take care of the messages from the phone state changes
      */
-    private Handler mHandler = new Handler() {
+    private final Handler mHandler = new Handler() {
         @Override
         public void handleMessage(Message msg) {
             switch (msg.what) {
@@ -339,13 +357,13 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
 
 
     /**
-     * DTMFTwelveKeyDialer constructor.
+     * DTMFTwelveKeyDialer constructor with {@link DTMFTwelveKeyDialerView}
      *
      * @param parent the InCallScreen instance that owns us.
      * @param dialerView the DTMFTwelveKeyDialerView we should use to display the dialpad.
      */
     public DTMFTwelveKeyDialer(InCallScreen parent,
-                               DTMFTwelveKeyDialerView dialerView) {
+                                DTMFTwelveKeyDialerView dialerView) {
         if (DBG) log("DTMFTwelveKeyDialer constructor... this = " + this);
 
         mInCallScreen = parent;
@@ -362,27 +380,58 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
         if (DBG) log("- Got passed-in mDialerView: " + mDialerView);
 
         if (mDialerView != null) {
-            mDialerView.setDialer(this);
-
-            // In the normal in-call DTMF dialpad, mDialpadDigits is an
-            // EditText used to display the digits the user has typed so
-            // far.  But some other modes (like the OTA call) have no
-            // "digits" display at all, in which case mDialpadDigits will
-            // be null.
-            mDialpadDigits = (EditText) mDialerView.findViewById(R.id.dtmfDialerField);
-            if (mDialpadDigits != null) {
-                mDialerKeyListener = new DTMFKeyListener();
-                mDialpadDigits.setKeyListener(mDialerKeyListener);
-
-                // remove the long-press context menus that support
-                // the edit (copy / paste / select) functions.
-                mDialpadDigits.setLongClickable(false);
-            }
-
-            // Hook up touch / key listeners for the buttons in the onscreen
-            // keypad.
-            setupKeypad(mDialerView);
+            setupDialerView();
         }
+    }
+
+    /**
+     * DTMFTwelveKeyDialer constructor with {@link ViewStub}.
+     *
+     * When the dialer is required for the first time (e.g. when {@link #openDialer(boolean)} is
+     * called), the object will inflate the ViewStub by itself, assuming the ViewStub will return
+     * {@link DTMFTwelveKeyDialerView} on {@link ViewStub#inflate()}.
+     *
+     * @param parent the InCallScreen instance that owns us.
+     * @param dialerStub ViewStub which will return {@link DTMFTwelveKeyDialerView} on
+     * {@link ViewStub#inflate()}.
+     */
+    public DTMFTwelveKeyDialer(InCallScreen parent, ViewStub dialerStub) {
+        if (DBG) log("DTMFTwelveKeyDialer constructor... this = " + this);
+
+        mInCallScreen = parent;
+        mCM = PhoneApp.getInstance().mCM;
+
+        mDialerStub = dialerStub;
+        if (DBG) log("- Got passed-in mDialerStub: " + mDialerStub);
+
+        // At this moment mDialerView is still null. We delay calling setupDialerView().
+    }
+
+    /**
+     * Prepare the dialer view and relevant variables.
+     */
+    private void setupDialerView() {
+        if (DBG) log("setupDialerView()");
+        mDialerView.setDialer(this);
+
+        // In the normal in-call DTMF dialpad, mDialpadDigits is an
+        // EditText used to display the digits the user has typed so
+        // far.  But some other modes (like the OTA call) have no
+        // "digits" display at all, in which case mDialpadDigits will
+        // be null.
+        mDialpadDigits = (EditText) mDialerView.findViewById(R.id.dtmfDialerField);
+        if (mDialpadDigits != null) {
+            mDialerKeyListener = new DTMFKeyListener();
+            mDialpadDigits.setKeyListener(mDialerKeyListener);
+
+            // remove the long-press context menus that support
+            // the edit (copy / paste / select) functions.
+            mDialpadDigits.setLongClickable(false);
+        }
+
+        // Hook up touch / key listeners for the buttons in the onscreen
+        // keypad.
+        setupKeypad(mDialerView);
     }
 
     /**
@@ -407,7 +456,7 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
      * Dialer code that runs when the dialer is brought up.
      * This includes layout changes, etc, and just prepares the dialer model for use.
      */
-    private void onDialerOpen() {
+    private void onDialerOpen(boolean animate) {
         if (DBG) log("onDialerOpen()...");
 
         // Any time the dialer is open, listen for "disconnect" events (so
@@ -419,7 +468,11 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
         PhoneApp.getInstance().updateWakeState();
 
         // Give the InCallScreen a chance to do any necessary UI updates.
-        mInCallScreen.onDialerOpen();
+        if (mInCallScreen != null) {
+            mInCallScreen.onDialerOpen(animate);
+        } else {
+            Log.e(LOG_TAG, "InCallScreen object was null during onDialerOpen()");
+        }
     }
 
     /**
@@ -467,7 +520,7 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
      * Dialer code that runs when the dialer is closed.
      * This releases resources acquired when we start the dialer.
      */
-    private void onDialerClose() {
+    private void onDialerClose(boolean animate) {
         if (DBG) log("onDialerClose()...");
 
         // reset back to a short delay for the poke lock.
@@ -478,7 +531,9 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
 
         // Give the InCallScreen a chance to do any necessary UI updates.
         if (mInCallScreen != null) {
-            mInCallScreen.onDialerClose();
+            mInCallScreen.onDialerClose(animate);
+        } else {
+            Log.e(LOG_TAG, "InCallScreen object was null during onDialerClose()");
         }
     }
 
@@ -504,7 +559,11 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
      */
     public boolean onDialerKeyDown(KeyEvent event) {
         if (DBG) log("Notifying dtmf key down.");
-        return mDialerKeyListener.onKeyDown(event);
+        if (mDialerKeyListener != null) {
+            return mDialerKeyListener.onKeyDown(event);
+        } else {
+            return false;
+        }
     }
 
     /**
@@ -512,7 +571,11 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
      */
     public boolean onDialerKeyUp(KeyEvent event) {
         if (DBG) log("Notifying dtmf key up.");
-        return mDialerKeyListener.onKeyUp(event);
+        if (mDialerKeyListener != null) {
+            return mDialerKeyListener.onKeyUp(event);
+        } else {
+            return false;
+        }
     }
 
     /**
@@ -558,6 +621,7 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
     /**
      * Implemented for the TouchListener, process the touch events.
      */
+    @Override
     public boolean onTouch(View v, MotionEvent event) {
         int viewId = v.getId();
 
@@ -584,6 +648,7 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
     /**
      * Implements View.OnKeyListener for the DTMF buttons.  Enables dialing with trackball/dpad.
      */
+    @Override
     public boolean onKey(View v, int keyCode, KeyEvent event) {
         // if (DBG) log("onKey:  keyCode " + keyCode + ", view " + v);
 
@@ -608,37 +673,63 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
     }
 
     /**
-     * @return true if the dialer is currently visible onscreen.
+     * Returns true if the dialer is in "open" state, meaning it is already visible *and* it
+     * isn't fading out. Note that during fade-out animation the View will return VISIBLE but
+     * will become GONE soon later, so you would want to use this method instead of
+     * {@link View#getVisibility()}.
+     *
+     * Fade-in animation, on the other hand, will set the View's visibility VISIBLE soon after
+     * the request, so we don't need to take care much of it. In other words,
+     * {@link #openDialer(boolean)} soon makes the visibility VISIBLE and thus this method will
+     * return true just after the method call.
+     *
+     * Note: during the very early stage of "open" state, users may not see the dialpad yet because
+     * of its fading-in animation, while they will see it shortly anyway. Similarly, during the
+     * early stage of "closed" state (opposite of "open" state), users may still see the dialpad
+     * due to fading-out animation, but it will vanish shortly and thus we can treat it as "closed",
+     * or "not open". To make the transition clearer, we call the state "open", not "shown" nor
+     * "visible".
      */
-    // TODO: clean up naming inconsistency of "opened" vs. "visible".
-    // This should be called isVisible(), and open/closeDialer() should
-    // be "show" and "hide".
     public boolean isOpened() {
         // Return whether or not the dialer view is visible.
         // (Note that if we're in the middle of a fade-out animation, that
         // also counts as "not visible" even though mDialerView itself is
         // technically still VISIBLE.)
-        return ((mDialerView.getVisibility() == View.VISIBLE)
-                && !CallCard.Fade.isFadingOut(mDialerView));
+        return (mDialerView != null
+                &&(mDialerView.getVisibility() == View.VISIBLE)
+                && !AnimationUtils.Fade.isFadingOut(mDialerView));
     }
 
     /**
      * Forces the dialer into the "open" state.
      * Does nothing if the dialer is already open.
      *
+     * The "open" state includes the state the dialer is fading in.
+     * {@link InCallScreen#onDialerOpen(boolean)} will change visibility state and do
+     * actual animation.
+     *
      * @param animate if true, open the dialer with an animation.
+     *
+     * @see #isOpened
      */
     public void openDialer(boolean animate) {
         if (DBG) log("openDialer()...");
 
+        if (mDialerView == null && mDialerStub != null) {
+            if (DBG) log("Dialer isn't ready. Inflate it from ViewStub.");
+            mDialerView = (DTMFTwelveKeyDialerView) mDialerStub.inflate();
+            setupDialerView();
+            mDialerStub = null;
+        }
+
         if (!isOpened()) {
             // Make the dialer view visible.
             if (animate) {
-                CallCard.Fade.show(mDialerView);
+                AnimationUtils.Fade.show(mDialerView);
             } else {
                 mDialerView.setVisibility(View.VISIBLE);
             }
-            onDialerOpen();
+            onDialerOpen(animate);
         }
     }
 
@@ -646,7 +737,12 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
      * Forces the dialer into the "closed" state.
      * Does nothing if the dialer is already closed.
      *
+     * {@link InCallScreen#onDialerOpen(boolean)} will change visibility state and do
+     * actual animation.
+     *
      * @param animate if true, close the dialer with an animation.
+     *
+     * @see #isOpened
      */
     public void closeDialer(boolean animate) {
         if (DBG) log("closeDialer()...");
@@ -654,11 +750,11 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
         if (isOpened()) {
             // Hide the dialer view.
             if (animate) {
-                CallCard.Fade.hide(mDialerView, View.GONE);
+                AnimationUtils.Fade.hide(mDialerView, View.GONE);
             } else {
                 mDialerView.setVisibility(View.GONE);
             }
-            onDialerClose();
+            onDialerClose(animate);
         }
     }
 
@@ -739,9 +835,14 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
         if (!mToneMap.containsKey(c)) {
             return;
         }
+
+        if (!mInCallScreen.okToDialDTMFTones()) {
+            return;
+        }
+
         // Read the settings as it may be changed by the user during the call
         Phone phone = mCM.getFgPhone();
-        mShortTone = TelephonyCapabilities.useShortDtmfTones(phone, phone.getContext());
+        mShortTone = PhoneUtils.useShortDtmfTones(phone, phone.getContext());
 
         if (DBG) log("startDtmfTone()...");
 
@@ -799,6 +900,9 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
      * Stops the local tone based on the phone type.
      */
     public void stopTone() {
+        // We do not rely on InCallScreen#okToDialDTMFTones() here since it is ok to stop tones
+        // without starting them.
+
         if (!mShortTone) {
             if (DBG) log("stopping remote tone.");
             mCM.stopDtmf();
@@ -839,7 +943,6 @@ public class DTMFTwelveKeyDialer implements View.OnTouchListener, View.OnKeyList
                 mDTMFQueue.add(new Character(dtmfDigit));
             } else {
                 String dtmfStr = Character.toString(dtmfDigit);
-                Log.i(LOG_TAG, "dtmfsent = " + dtmfStr);
                 mCM.sendBurstDtmf(dtmfStr, 0, 0, mHandler.obtainMessage(DTMF_SEND_CNF));
                 // Set flag to indicate wait for Telephony confirmation.
                 mDTMFBurstCnfPending = true;

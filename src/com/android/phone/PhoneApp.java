@@ -19,12 +19,14 @@ package com.android.phone;
 import android.app.Activity;
 import android.app.Application;
 import android.app.KeyguardManager;
+import android.app.PendingIntent;
 import android.app.ProgressDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothHeadset;
 import android.bluetooth.BluetoothProfile;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -44,6 +46,7 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.os.UpdateLock;
 import android.preference.PreferenceManager;
 import android.provider.Settings.System;
 import android.telephony.ServiceState;
@@ -57,6 +60,7 @@ import com.android.internal.telephony.IccCard;
 import com.android.internal.telephony.MmiCode;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneFactory;
+import com.android.internal.telephony.TelephonyCapabilities;
 import com.android.internal.telephony.TelephonyIntents;
 import com.android.internal.telephony.cdma.TtyIntent;
 import com.android.phone.OtaUtils.CdmaOtaScreenState;
@@ -137,6 +141,28 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
         FULL
     }
 
+    /**
+     * Intent Action used for hanging up the current call from Notification bar. This will
+     * choose first ringing call, first active call, or first background call (typically in
+     * HOLDING state).
+     */
+    public static final String ACTION_HANG_UP_ONGOING_CALL =
+            "com.android.phone.ACTION_HANG_UP_ONGOING_CALL";
+
+    /**
+     * Intent Action used for making a phone call from Notification bar.
+     * This is for missed call notifications.
+     */
+    public static final String ACTION_CALL_BACK_FROM_NOTIFICATION =
+            "com.android.phone.ACTION_CALL_BACK_FROM_NOTIFICATION";
+
+    /**
+     * Intent Action used for sending a SMS from notification bar.
+     * This is for missed call notifications.
+     */
+    public static final String ACTION_SEND_SMS_FROM_NOTIFICATION =
+            "com.android.phone.ACTION_SEND_SMS_FROM_NOTIFICATION";
+
     private static PhoneApp sMe;
 
     // A few important fields we expose to the rest of the package
@@ -144,6 +170,7 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
     Phone phone;
     CallController callController;
     InCallUiState inCallUiState;
+    CallerInfoCache callerInfoCache;
     CallNotifier notifier;
     NotificationMgr notificationMgr;
     Ringer ringer;
@@ -186,12 +213,26 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
     private boolean mBeginningCall;
 
     // Last phone state seen by updatePhoneState()
-    Phone.State mLastPhoneState = Phone.State.IDLE;
+    private Phone.State mLastPhoneState = Phone.State.IDLE;
 
     private WakeState mWakeState = WakeState.SLEEP;
+
+    /**
+     * Timeout setting used by PokeLock.
+     *
+     * This variable won't be effective when proximity sensor is available in the device.
+     *
+     * @see ScreenTimeoutDuration
+     */
     private ScreenTimeoutDuration mScreenTimeoutDuration = ScreenTimeoutDuration.DEFAULT;
+    /**
+     * Used to set/unset {@link LocalPowerManager#POKE_LOCK_IGNORE_TOUCH_EVENTS} toward PokeLock.
+     *
+     * This variable won't be effective when proximity sensor is available in the device.
+     */
     private boolean mIgnoreTouchUserActivity = false;
-    private IBinder mPokeLockToken = new Binder();
+    private final IBinder mPokeLockToken = new Binder();
+
     private IPowerManager mPowerManagerService;
     private PowerManager.WakeLock mWakeLock;
     private PowerManager.WakeLock mPartialWakeLock;
@@ -199,6 +240,8 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
     private KeyguardManager mKeyguardManager;
     private AccelerometerListener mAccelerometerListener;
     private int mOrientation = AccelerometerListener.ORIENTATION_UNKNOWN;
+
+    private UpdateLock mUpdateLock;
 
     // Broadcast receiver for various intent broadcasts (see onCreate())
     private final BroadcastReceiver mReceiver = new PhoneAppBroadcastReceiver();
@@ -429,6 +472,10 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
             // Get the default phone
             phone = PhoneFactory.getDefaultPhone();
 
+            // Start TelephonyDebugService After the default phone is created.
+            Intent intent = new Intent(this, TelephonyDebugService.class);
+            startService(intent);
+
             mCM = CallManager.getInstance();
             mCM.registerPhone(phone);
 
@@ -488,6 +535,12 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
             mPowerManagerService = IPowerManager.Stub.asInterface(
                     ServiceManager.getService("power"));
 
+            // Get UpdateLock to suppress system-update related events (e.g. dialog show-up)
+            // during phone calls.
+            mUpdateLock = new UpdateLock("phone");
+
+            if (DBG) Log.d(LOG_TAG, "onCreate: mUpdateLock: " + mUpdateLock);
+
             // Create the CallController singleton, which is the interface
             // to the telephony layer for user-initiated telephony functionality
             // (like making outgoing calls.)
@@ -495,6 +548,12 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
             // ...and also the InCallUiState instance, used by the CallController to
             // keep track of some "persistent state" of the in-call UI.
             inCallUiState = InCallUiState.init(this);
+
+            // Create the CallerInfoCache singleton, which remembers custom ring tone and
+            // send-to-voicemail settings.
+            //
+            // The asynchronous caching will start just after this call.
+            callerInfoCache = CallerInfoCache.init(this);
 
             // Create the CallNotifer singleton, which handles
             // asynchronous events from the telephony layer (like
@@ -526,7 +585,6 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
             intentFilter.addAction(TelephonyIntents.ACTION_ANY_DATA_CONNECTION_STATE_CHANGED);
             intentFilter.addAction(Intent.ACTION_HEADSET_PLUG);
             intentFilter.addAction(Intent.ACTION_DOCK_EVENT);
-            intentFilter.addAction(Intent.ACTION_BATTERY_LOW);
             intentFilter.addAction(TelephonyIntents.ACTION_SIM_STATE_CHANGED);
             intentFilter.addAction(TelephonyIntents.ACTION_RADIO_TECHNOLOGY_CHANGED);
             intentFilter.addAction(TelephonyIntents.ACTION_SERVICE_STATE_CHANGED);
@@ -542,13 +600,18 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
             // we get these intents *before* the media player.)
             IntentFilter mediaButtonIntentFilter =
                     new IntentFilter(Intent.ACTION_MEDIA_BUTTON);
-            //
+            // TODO verify the independent priority doesn't need to be handled thanks to the
+            //  private intent handler registration
             // Make sure we're higher priority than the media player's
             // MediaButtonIntentReceiver (which currently has the default
             // priority of zero; see apps/Music/AndroidManifest.xml.)
             mediaButtonIntentFilter.setPriority(1);
             //
             registerReceiver(mMediaButtonReceiver, mediaButtonIntentFilter);
+            // register the component so it gets priority for calls
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            am.registerMediaButtonEventReceiverForCalls(new ComponentName(this.getPackageName(),
+                    MediaButtonBroadcastReceiver.class.getName()));
 
             //set the default values for the preferences in the phone.
             PreferenceManager.setDefaultValues(this, R.xml.network_setting, false);
@@ -675,10 +738,32 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
         return intent;
     }
 
-    // TODO(InCallScreen redesign): This should be made private once
-    // we fix PhoneInterfaceManager.java to *not* manually launch
-    // the InCallScreen from its call() method.
-    static String getCallScreenClassName() {
+    /**
+     * Returns PendingIntent for hanging up ongoing phone call. This will typically be used from
+     * Notification context.
+     */
+    /* package */ static PendingIntent createHangUpOngoingCallPendingIntent(Context context) {
+        Intent intent = new Intent(PhoneApp.ACTION_HANG_UP_ONGOING_CALL, null,
+                context, NotificationBroadcastReceiver.class);
+        return PendingIntent.getBroadcast(context, 0, intent, 0);
+    }
+
+    /* package */ static PendingIntent getCallBackPendingIntent(Context context, String number) {
+        Intent intent = new Intent(ACTION_CALL_BACK_FROM_NOTIFICATION,
+                Uri.fromParts(Constants.SCHEME_TEL, number, null),
+                context, NotificationBroadcastReceiver.class);
+        return PendingIntent.getBroadcast(context, 0, intent, 0);
+    }
+
+    /* package */ static PendingIntent getSendSmsFromNotificationPendingIntent(
+            Context context, String number) {
+        Intent intent = new Intent(ACTION_SEND_SMS_FROM_NOTIFICATION,
+                Uri.fromParts(Constants.SCHEME_SMSTO, number, null),
+                context, NotificationBroadcastReceiver.class);
+        return PendingIntent.getBroadcast(context, 0, intent, 0);
+    }
+
+    private static String getCallScreenClassName() {
         return InCallScreen.class.getName();
     }
 
@@ -740,6 +825,30 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
         return mInCallScreen.isForegroundActivity();
     }
 
+    /**
+     * @return true if the in-call UI is running as the foreground activity, or,
+     * it went to background due to screen being turned off. This might be useful
+     * to determine if the in-call screen went to background because of other
+     * activities, or its proximity sensor state or manual power-button press.
+     *
+     * Here are some examples.
+     *
+     * - If you want to know if the activity is in foreground or screen is turned off
+     *   from the in-call UI (i.e. though it is not "foreground" anymore it will become
+     *   so after screen being turned on), check
+     *   {@link #isShowingCallScreenForProximity()} is true or not.
+     *   {@link #updateProximitySensorMode(com.android.internal.telephony.Phone.State)} is
+     *   doing this.
+     *
+     * - If you want to know if the activity is not in foreground just because screen
+     *   is turned off (not due to other activity's interference), check
+     *   {@link #isShowingCallScreen()} is false *and* {@link #isShowingCallScreenForProximity()}
+     *   is true. InCallScreen#onDisconnect() is doing this check.
+     *
+     * @see #isShowingCallScreen()
+     *
+     * TODO: come up with better naming..
+     */
     boolean isShowingCallScreenForProximity() {
         if (mInCallScreen == null) return false;
         return mInCallScreen.isForegroundActivityForProximity();
@@ -855,28 +964,27 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
     /**
      * Controls how quickly the screen times out.
      *
+     * This is no-op when the device supports proximity sensor.
+     *
      * The poke lock controls how long it takes before the screen powers
      * down, and therefore has no immediate effect when the current
      * WakeState (see {@link PhoneApp#requestWakeState}) is FULL.
      * If we're in a state where the screen *is* allowed to turn off,
      * though, the poke lock will determine the timeout interval (long or
      * short).
-     *
-     * @param shortPokeLock tells the device the timeout duration to use
-     * before going to sleep
-     * {@link com.android.server.PowerManagerService#SHORT_KEYLIGHT_DELAY}.
      */
     /* package */ void setScreenTimeout(ScreenTimeoutDuration duration) {
         if (VDBG) Log.d(LOG_TAG, "setScreenTimeout(" + duration + ")...");
+
+        // stick with default timeout if we are using the proximity sensor
+        if (proximitySensorModeEnabled()) {
+            return;
+        }
 
         // make sure we don't set the poke lock repeatedly so that we
         // avoid triggering the userActivity calls in
         // PowerManagerService.setPokeLock().
         if (duration == mScreenTimeoutDuration) {
-            return;
-        }
-        // stick with default timeout if we are using the proximity sensor
-        if (proximitySensorModeEnabled()) {
             return;
         }
         mScreenTimeoutDuration = duration;
@@ -889,6 +997,13 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
      * current "ignore user activity on touch" flag.
      */
     private void updatePokeLock() {
+        // Caller must take care of the check. This block is purely for safety.
+        if (proximitySensorModeEnabled()) {
+            Log.wtf(LOG_TAG, "PokeLock should not be used when proximity sensor is available on"
+                    + " the device.");
+            return;
+        }
+
         // This is kind of convoluted, but the basic thing to remember is
         // that the poke lock just sends a message to the screen to tell
         // it to stay on for a while.
@@ -1104,6 +1219,8 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
      * Sets or clears the flag that tells the PowerManager that touch
      * (and cheek) events should NOT be considered "user activity".
      *
+     * This method is no-op when proximity sensor is available on the device.
+     *
      * Since the in-call UI is totally insensitive to touch in most
      * states, we set this flag whenever the InCallScreen is in the
      * foreground.  (Otherwise, repeated unintentional touches could
@@ -1115,6 +1232,11 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
      */
     /* package */ void setIgnoreTouchUserActivity(boolean ignore) {
         if (VDBG) Log.d(LOG_TAG, "setIgnoreTouchUserActivity(" + ignore + ")...");
+        // stick with default timeout if we are using the proximity sensor
+        if (proximitySensorModeEnabled()) {
+            return;
+        }
+
         mIgnoreTouchUserActivity = ignore;
         updatePokeLock();
     }
@@ -1196,6 +1318,19 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
                         (mOrientation == AccelerometerListener.ORIENTATION_HORIZONTAL);
                 screenOnImmediately |= !isShowingCallScreenForProximity() && horizontal;
 
+                // We do not keep the screen off when dialpad is visible, we are horizontal, and
+                // the in-call screen is being shown.
+                // At that moment we're pretty sure users want to use it, instead of letting the
+                // proximity sensor turn off the screen by their hands.
+                boolean dialpadVisible = false;
+                if (mInCallScreen != null) {
+                    dialpadVisible =
+                            mInCallScreen.getUpdatedInCallControlState().dialpadEnabled
+                            && mInCallScreen.getUpdatedInCallControlState().dialpadVisible
+                            && isShowingCallScreen();
+                }
+                screenOnImmediately |= dialpadVisible && horizontal;
+
                 if (((state == Phone.State.OFFHOOK) || mBeginningCall) && !screenOnImmediately) {
                     // Phone is in use!  Arrange for the screen to turn off
                     // automatically when the sensor detects a close object.
@@ -1226,6 +1361,7 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
         }
     }
 
+    @Override
     public void orientationChanged(int orientation) {
         mOrientation = orientation;
         updateProximitySensorMode(mCM.getState());
@@ -1233,12 +1369,37 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
 
     /**
      * Notifies the phone app when the phone state changes.
-     * Currently used only for proximity sensor support.
+     *
+     * This method will updates various states inside Phone app (e.g. proximity sensor mode,
+     * accelerometer listener state, update-lock state, etc.)
      */
     /* package */ void updatePhoneState(Phone.State state) {
         if (state != mLastPhoneState) {
             mLastPhoneState = state;
             updateProximitySensorMode(state);
+
+            // Try to acquire or release UpdateLock.
+            //
+            // Watch out: we don't release the lock here when the screen is still in foreground.
+            // At that time InCallScreen will release it on onPause().
+            if (state != Phone.State.IDLE) {
+                // UpdateLock is a recursive lock, while we may get "acquire" request twice and
+                // "release" request once for a single call (RINGING + OFFHOOK and IDLE).
+                // We need to manually ensure the lock is just acquired once for each (and this
+                // will prevent other possible buggy situations too).
+                if (!mUpdateLock.isHeld()) {
+                    mUpdateLock.acquire();
+                }
+            } else {
+                if (!isShowingCallScreen()) {
+                    if (!mUpdateLock.isHeld()) {
+                        mUpdateLock.release();
+                    }
+                } else {
+                    // For this case InCallScreen will take care of the release() call.
+                }
+            }
+
             if (mAccelerometerListener != null) {
                 // use accelerometer to augment proximity sensor when in call
                 mOrientation = AccelerometerListener.ORIENTATION_UNKNOWN;
@@ -1259,6 +1420,13 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
 
     /* package */ Phone.State getPhoneState() {
         return mLastPhoneState;
+    }
+
+    /**
+     * Returns UpdateLock object.
+     */
+    /* package */ UpdateLock getUpdateLock() {
+        return mUpdateLock;
     }
 
     /**
@@ -1468,9 +1636,6 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
                 if (VDBG) Log.d(LOG_TAG, "    name: " + intent.getStringExtra("name"));
                 mIsHeadsetPlugged = (intent.getIntExtra("state", 0) == 1);
                 mHandler.sendMessage(mHandler.obtainMessage(EVENT_WIRED_HEADSET_PLUG, 0));
-            } else if (action.equals(Intent.ACTION_BATTERY_LOW)) {
-                if (VDBG) Log.d(LOG_TAG, "mReceiver: ACTION_BATTERY_LOW");
-                notifier.sendBatteryLow();  // Play a warning tone if in-call
             } else if ((action.equals(TelephonyIntents.ACTION_SIM_STATE_CHANGED)) &&
                     (mPUKEntryActivity != null)) {
                 // if an attempt to un-PUK-lock the device was made, while we're
@@ -1557,6 +1722,57 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
                     abortBroadcast();
                 }
             }
+        }
+    }
+
+    /**
+     * Accepts broadcast Intents which will be prepared by {@link NotificationMgr} and thus
+     * sent from framework's notification mechanism (which is outside Phone context).
+     * This should be visible from outside, but shouldn't be in "exported" state.
+     *
+     * TODO: If possible merge this into PhoneAppBroadcastReceiver.
+     */
+    public static class NotificationBroadcastReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            // TODO: use "if (VDBG)" here.
+            Log.d(LOG_TAG, "Broadcast from Notification: " + action);
+
+            if (action.equals(ACTION_HANG_UP_ONGOING_CALL)) {
+                PhoneUtils.hangup(PhoneApp.getInstance().mCM);
+            } else if (action.equals(ACTION_CALL_BACK_FROM_NOTIFICATION)) {
+                // Collapse the expanded notification and the notification item itself.
+                closeSystemDialogs(context);
+                clearMissedCallNotification(context);
+
+                Intent callIntent = new Intent(Intent.ACTION_CALL_PRIVILEGED, intent.getData());
+                callIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
+                context.startActivity(callIntent);
+            } else if (action.equals(ACTION_SEND_SMS_FROM_NOTIFICATION)) {
+                // Collapse the expanded notification and the notification item itself.
+                closeSystemDialogs(context);
+                clearMissedCallNotification(context);
+
+                Intent smsIntent = new Intent(Intent.ACTION_SENDTO, intent.getData());
+                smsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(smsIntent);
+            } else {
+                Log.w(LOG_TAG, "Received hang-up request from notification,"
+                        + " but there's no call the system can hang up.");
+            }
+        }
+
+        private void closeSystemDialogs(Context context) {
+            Intent intent = new Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
+            context.sendBroadcast(intent);
+        }
+
+        private void clearMissedCallNotification(Context context) {
+            Intent clearIntent = new Intent(context, ClearMissedCallsService.class);
+            clearIntent.setAction(ClearMissedCallsService.ACTION_CLEAR_MISSED_CALLS);
+            context.startService(clearIntent);
         }
     }
 
@@ -1716,9 +1932,52 @@ public class PhoneApp extends Application implements AccelerometerListener.Orien
     private static final String DEFAULT_CALL_ORIGIN_PACKAGE = "com.android.contacts";
     private static final String ALLOWED_EXTRA_CALL_ORIGIN =
             "com.android.contacts.activities.DialtactsActivity";
+    /**
+     * Used to determine if the preserved call origin is fresh enough.
+     */
+    private static final long CALL_ORIGIN_EXPIRATION_MILLIS = 30 * 1000;
 
     public void setLatestActiveCallOrigin(String callOrigin) {
         inCallUiState.latestActiveCallOrigin = callOrigin;
+        if (callOrigin != null) {
+            inCallUiState.latestActiveCallOriginTimeStamp = SystemClock.elapsedRealtime();
+        } else {
+            inCallUiState.latestActiveCallOriginTimeStamp = 0;
+        }
+    }
+
+    /**
+     * Reset call origin depending on its timestamp.
+     *
+     * See if the current call origin preserved by the app is fresh enough or not. If it is,
+     * previous call origin will be used as is. If not, call origin will be reset.
+     *
+     * This will be effective especially for 3rd party apps which want to bypass phone calls with
+     * their own telephone lines. In that case Phone app may finish the phone call once and make
+     * another for the external apps, which will drop call origin information in Intent.
+     * Even in that case we are sure the second phone call should be initiated just after the first
+     * phone call, so here we restore it from the previous information iff the second call is done
+     * fairly soon.
+     */
+    public void resetLatestActiveCallOrigin() {
+        final long callOriginTimestamp = inCallUiState.latestActiveCallOriginTimeStamp;
+        final long currentTimestamp = SystemClock.elapsedRealtime();
+        if (VDBG) {
+            Log.d(LOG_TAG, "currentTimeMillis: " + currentTimestamp
+                    + ", saved timestamp for call origin: " + callOriginTimestamp);
+        }
+        if (inCallUiState.latestActiveCallOriginTimeStamp > 0
+                && (currentTimestamp - callOriginTimestamp < CALL_ORIGIN_EXPIRATION_MILLIS)) {
+            if (VDBG) {
+                Log.d(LOG_TAG, "Resume previous call origin (" +
+                        inCallUiState.latestActiveCallOrigin + ")");
+            }
+            // Do nothing toward call origin itself but update the timestamp just in case.
+            inCallUiState.latestActiveCallOriginTimeStamp = currentTimestamp;
+        } else {
+            if (VDBG) Log.d(LOG_TAG, "Drop previous call origin and set the current one to null");
+            setLatestActiveCallOrigin(null);
+        }
     }
 
     /**

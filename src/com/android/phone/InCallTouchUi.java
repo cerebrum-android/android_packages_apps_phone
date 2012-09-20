@@ -16,20 +16,24 @@
 
 package com.android.phone;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.content.Context;
-import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
 import android.os.Handler;
 import android.os.Message;
 import android.os.SystemClock;
+import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.util.Log;
-import android.view.LayoutInflater;
+import android.view.Gravity;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewPropertyAnimator;
+import android.view.ViewStub;
 import android.view.animation.AlphaAnimation;
 import android.view.animation.Animation;
 import android.view.animation.Animation.AnimationListener;
@@ -37,13 +41,14 @@ import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.PopupMenu;
+import android.widget.Toast;
 
 import com.android.internal.telephony.Call;
-import com.android.internal.telephony.Phone;
-import com.android.internal.widget.multiwaveview.MultiWaveView;
-import com.android.internal.widget.multiwaveview.MultiWaveView.OnTriggerListener;
 import com.android.internal.telephony.CallManager;
-
+import com.android.internal.telephony.Phone;
+import com.android.internal.widget.multiwaveview.GlowPadView;
+import com.android.internal.widget.multiwaveview.GlowPadView.OnTriggerListener;
+import com.android.phone.InCallUiState.InCallScreenMode;
 
 /**
  * In-call onscreen touch UI elements, used on some platforms.
@@ -52,9 +57,8 @@ import com.android.internal.telephony.CallManager;
  * non-touch-sensitive parts of the in-call UI (i.e. the call card).
  */
 public class InCallTouchUi extends FrameLayout
-        implements View.OnClickListener, OnTriggerListener,
+        implements View.OnClickListener, View.OnLongClickListener, OnTriggerListener,
         PopupMenu.OnMenuItemClickListener, PopupMenu.OnDismissListener {
-    private static final int IN_CALL_WIDGET_TRANSITION_TIME = 250; // in ms
     private static final String LOG_TAG = "InCallTouchUi";
     private static final boolean DBG = (PhoneApp.DBG_LEVEL >= 2);
 
@@ -74,8 +78,14 @@ public class InCallTouchUi extends FrameLayout
     private PhoneApp mApp;
 
     // UI containers / elements
-    private MultiWaveView mIncomingCallWidget;  // UI used for an incoming call
-    private View mInCallControls;  // UI elements while on a regular call
+    private GlowPadView mIncomingCallWidget;  // UI used for an incoming call
+    private boolean mIncomingCallWidgetIsFadingOut;
+    private boolean mIncomingCallWidgetShouldBeReset = true;
+
+    /** UI elements while on a regular call (bottom buttons, DTMF dialpad) */
+    private View mInCallControls;
+    private boolean mShowInCallControlsDuringHidingAnimation;
+
     //
     private ImageButton mAddButton;
     private ImageButton mMergeButton;
@@ -86,8 +96,9 @@ public class InCallTouchUi extends FrameLayout
     private CompoundButton mHoldButton;
     private ImageButton mSwapButton;
     private View mHoldSwapSpacer;
-    //
-    private ViewGroup mExtraButtonRow;
+
+    // "Extra button row"
+    private ViewStub mExtraButtonRow;
     private ViewGroup mCdmaMergeButton;
     private ViewGroup mManageConferenceButton;
     private ImageButton mManageConferenceButtonImage;
@@ -99,7 +110,7 @@ public class InCallTouchUi extends FrameLayout
     // Time of the most recent "answer" or "reject" action (see updateState())
     private long mLastIncomingCallActionTime;  // in SystemClock.uptimeMillis() time base
 
-    // Parameters for the MultiWaveView "ping" animation; see triggerPing().
+    // Parameters for the GlowPadView "ping" animation; see triggerPing().
     private static final boolean ENABLE_PING_ON_RING_EVENTS = false;
     private static final boolean ENABLE_PING_AUTO_REPEAT = true;
     private static final long PING_AUTO_REPEAT_DELAY_MSEC = 1200;
@@ -124,21 +135,12 @@ public class InCallTouchUi extends FrameLayout
             }
         };
 
-
     public InCallTouchUi(Context context, AttributeSet attrs) {
         super(context, attrs);
 
         if (DBG) log("InCallTouchUi constructor...");
         if (DBG) log("- this = " + this);
         if (DBG) log("- context " + context + ", attrs " + attrs);
-
-        // Inflate our contents, and add it (to ourself) as a child.
-        LayoutInflater inflater = LayoutInflater.from(context);
-        inflater.inflate(
-                R.layout.incall_touch_ui,  // resource
-                this,                      // root
-                true);
-
         mApp = PhoneApp.getInstance();
     }
 
@@ -154,7 +156,7 @@ public class InCallTouchUi extends FrameLayout
         // Look up the various UI elements.
 
         // "Drag-to-answer" widget for incoming calls.
-        mIncomingCallWidget = (MultiWaveView) findViewById(R.id.incomingCallWidget);
+        mIncomingCallWidget = (GlowPadView) findViewById(R.id.incomingCallWidget);
         mIncomingCallWidget.setOnTriggerListener(this);
 
         // Container for the UI elements shown while on a regular call.
@@ -164,20 +166,27 @@ public class InCallTouchUi extends FrameLayout
         // Main cluster of buttons:
         mAddButton = (ImageButton) mInCallControls.findViewById(R.id.addButton);
         mAddButton.setOnClickListener(this);
+        mAddButton.setOnLongClickListener(this);
         mMergeButton = (ImageButton) mInCallControls.findViewById(R.id.mergeButton);
         mMergeButton.setOnClickListener(this);
+        mMergeButton.setOnLongClickListener(this);
         mEndButton = (ImageButton) mInCallControls.findViewById(R.id.endButton);
         mEndButton.setOnClickListener(this);
         mDialpadButton = (CompoundButton) mInCallControls.findViewById(R.id.dialpadButton);
         mDialpadButton.setOnClickListener(this);
+        mDialpadButton.setOnLongClickListener(this);
         mMuteButton = (CompoundButton) mInCallControls.findViewById(R.id.muteButton);
         mMuteButton.setOnClickListener(this);
+        mMuteButton.setOnLongClickListener(this);
         mAudioButton = (CompoundButton) mInCallControls.findViewById(R.id.audioButton);
         mAudioButton.setOnClickListener(this);
+        mAudioButton.setOnLongClickListener(this);
         mHoldButton = (CompoundButton) mInCallControls.findViewById(R.id.holdButton);
         mHoldButton.setOnClickListener(this);
+        mHoldButton.setOnLongClickListener(this);
         mSwapButton = (ImageButton) mInCallControls.findViewById(R.id.swapButton);
         mSwapButton.setOnClickListener(this);
+        mSwapButton.setOnLongClickListener(this);
         mHoldSwapSpacer = mInCallControls.findViewById(R.id.holdSwapSpacer);
 
         // TODO: Back when these buttons had text labels, we changed
@@ -195,34 +204,9 @@ public class InCallTouchUi extends FrameLayout
         // button in CDMA.
 
         // Buttons shown on the "extra button row", only visible in certain (rare) states.
-        mExtraButtonRow = (ViewGroup) mInCallControls.findViewById(R.id.extraButtonRow);
-        // The two "buttons" here (mCdmaMergeButton and mManageConferenceButton)
-        // are actually layouts containing an icon and a text label side-by-side.
-        mCdmaMergeButton =
-                (ViewGroup) mInCallControls.findViewById(R.id.cdmaMergeButton);
-        mCdmaMergeButton.setOnClickListener(this);
-        //
-        mManageConferenceButton =
-                (ViewGroup) mInCallControls.findViewById(R.id.manageConferenceButton);
-        mManageConferenceButton.setOnClickListener(this);
-        mManageConferenceButtonImage =
-                (ImageButton) mInCallControls.findViewById(R.id.manageConferenceButtonImage);
+        mExtraButtonRow = (ViewStub) mInCallControls.findViewById(R.id.extraButtonRow);
 
-        // Add a custom OnTouchListener to manually shrink the "hit
-        // target" of some buttons.
-        // (We do this for a few specific buttons which are vulnerable to
-        // "false touches" because either (1) they're near the edge of the
-        // screen and might be unintentionally touched while holding the
-        // device in your hand, or (2) they're in the upper corners and might
-        // be touched by the user's ear before the prox sensor has a chance to
-        // kick in.)
-        //
-        // TODO (new ICS layout): not sure which buttons need this yet.
-        // For now, use it only with the "End call" button (which extends all
-        // the way to the edges of the screen).  But we can consider doing
-        // this for "Dialpad" and/or "Add call" if those turn out to be a
-        // problem too.
-        //
+        // Add a custom OnTouchListener to manually shrink the "hit target".
         View.OnTouchListener smallerHitTargetTouchListener = new SmallerHitTargetTouchListener();
         mEndButton.setOnTouchListener(smallerHitTargetTouchListener);
     }
@@ -231,7 +215,7 @@ public class InCallTouchUi extends FrameLayout
      * Updates the visibility and/or state of our UI elements, based on
      * the current state of the phone.
      */
-    void updateState(CallManager cm) {
+    /* package */ void updateState(CallManager cm) {
         if (mInCallScreen == null) {
             log("- updateState: mInCallScreen has been destroyed; bailing out...");
             return;
@@ -251,8 +235,7 @@ public class InCallTouchUi extends FrameLayout
         // layer rejects the ringing call while the FG call is dialing/alerting,
         // but the incoming call *does* briefly exist in the DISCONNECTING or
         // DISCONNECTED state.
-        if ((ringingCall.getState() != Call.State.IDLE)
-                && !fgCallState.isDialing()) {
+        if ((ringingCall.getState() != Call.State.IDLE) && !fgCallState.isDialing()) {
             // A phone call is ringing *or* call waiting.
 
             // Watch out: even if the phone state is RINGING, it's
@@ -266,9 +249,14 @@ public class InCallTouchUi extends FrameLayout
             }
 
             // Ugly hack to cover up slow response from the radio:
-            // if we attempted to answer or reject an incoming call
-            // within the last 500 msec, *don't* show the incoming call
+            // if we get an updateState() call immediately after answering/rejecting a call
+            // (via onTrigger()), *don't* show the incoming call
             // UI even if the phone is still in the RINGING state.
+            // This covers up a slow response from the radio for some actions.
+            // To detect that situation, we are using "500 msec" heuristics.
+            //
+            // Watch out: we should *not* rely on this behavior when "instant text response" action
+            // has been chosen. See also onTrigger() for why.
             long now = SystemClock.uptimeMillis();
             if (now < mLastIncomingCallActionTime + 500) {
                 log("updateState: Too soon after last action; not drawing!");
@@ -276,20 +264,31 @@ public class InCallTouchUi extends FrameLayout
             }
         } else {
             // Ok, show the regular in-call touch UI (with some exceptions):
-            if (mInCallScreen.okToShowInCallTouchUi()) {
+            if (okToShowInCallControls()) {
                 showInCallControls = true;
             } else {
                 if (DBG) log("- updateState: NOT OK to show touch UI; disabling...");
             }
         }
 
-        // Update visibility and state of the incoming call controls or
-        // the normal in-call controls.
-
+        // In usual cases we don't allow showing both incoming call controls and in-call controls.
+        //
+        // There's one exception: if this call is during fading-out animation for the incoming
+        // call controls, we need to show both for smoother transition.
         if (showIncomingCallControls && showInCallControls) {
             throw new IllegalStateException(
                 "'Incoming' and 'in-call' touch controls visible at the same time!");
         }
+        if (mShowInCallControlsDuringHidingAnimation) {
+            if (DBG) {
+                log("- updateState: FORCE showing in-call controls during incoming call widget"
+                        + " being hidden with animation");
+            }
+            showInCallControls = true;
+        }
+
+        // Update visibility and state of the incoming call controls or
+        // the normal in-call controls.
 
         if (showInCallControls) {
             if (DBG) log("- updateState: showing in-call controls...");
@@ -340,7 +339,26 @@ public class InCallTouchUi extends FrameLayout
         }
     }
 
-    // View.OnClickListener implementation
+    private boolean okToShowInCallControls() {
+        // Note that this method is concerned only with the internal state
+        // of the InCallScreen.  (The InCallTouchUi widget has separate
+        // logic to make sure it's OK to display the touch UI given the
+        // current telephony state, and that it's allowed on the current
+        // device in the first place.)
+
+        // The touch UI is available in the following InCallScreenModes:
+        // - NORMAL (obviously)
+        // - CALL_ENDED (which is intended to look mostly the same as
+        //               a normal in-call state, even though the in-call
+        //               buttons are mostly disabled)
+        // and is hidden in any of the other modes, like MANAGE_CONFERENCE
+        // or one of the OTA modes (which use totally different UIs.)
+
+        return ((mApp.inCallUiState.inCallScreenMode == InCallScreenMode.NORMAL)
+                || (mApp.inCallUiState.inCallScreenMode == InCallScreenMode.CALL_ENDED));
+    }
+
+    @Override
     public void onClick(View view) {
         int id = view.getId();
         if (DBG) log("onClick(View " + view + ", id " + id + ")...");
@@ -370,17 +388,48 @@ public class InCallTouchUi extends FrameLayout
         }
     }
 
+    @Override
+    public boolean onLongClick(View view) {
+        final int id = view.getId();
+        if (DBG) log("onLongClick(View " + view + ", id " + id + ")...");
+
+        switch (id) {
+            case R.id.addButton:
+            case R.id.mergeButton:
+            case R.id.dialpadButton:
+            case R.id.muteButton:
+            case R.id.holdButton:
+            case R.id.swapButton:
+            case R.id.audioButton: {
+                final CharSequence description = view.getContentDescription();
+                if (!TextUtils.isEmpty(description)) {
+                    // Show description as ActionBar's menu buttons do.
+                    // See also ActionMenuItemView#onLongClick() for the original implementation.
+                    final Toast cheatSheet =
+                            Toast.makeText(view.getContext(), description, Toast.LENGTH_SHORT);
+                    cheatSheet.setGravity(
+                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, view.getHeight());
+                    cheatSheet.show();
+                }
+                return true;
+            }
+            default:
+                Log.w(LOG_TAG, "onLongClick() with unexpected View " + view + ". Ignoring it.");
+                break;
+        }
+        return false;
+    }
     /**
      * Updates the enabledness and "checked" state of the buttons on the
      * "inCallControls" panel, based on the current telephony state.
      */
-    void updateInCallControls(CallManager cm) {
+    private void updateInCallControls(CallManager cm) {
         int phoneType = cm.getActiveFgCall().getPhone().getPhoneType();
 
         // Note we do NOT need to worry here about cases where the entire
         // in-call touch UI is disabled, like during an OTA call or if the
         // dtmf dialpad is up.  (That's handled by updateState(), which
-        // calls InCallScreen.okToShowInCallTouchUi().)
+        // calls okToShowInCallControls().)
         //
         // If we get here, it *is* OK to show the in-call touch UI, so we
         // now need to update the enabledness and/or "checked" state of
@@ -391,9 +440,10 @@ public class InCallTouchUi extends FrameLayout
         // state of the various onscreen buttons:
         InCallControlState inCallControlState = mInCallScreen.getUpdatedInCallControlState();
 
-        // The "extra button row" will be visible only if any of its
-        // buttons need to be visible.
-        boolean showExtraButtonRow = false;
+        if (DBG) {
+            log("updateInCallControls()...");
+            inCallControlState.dumpState();
+        }
 
         // "Add" / "Merge":
         // These two buttons occupy the same space onscreen, so at any
@@ -499,6 +549,7 @@ public class InCallTouchUi extends FrameLayout
                 mHoldSwapSpacer.setVisibility(View.GONE);
             }
         }
+        mInCallScreen.updateButtonStateOutsideInCallTouchUi();
         if (inCallControlState.canSwap && inCallControlState.canHold) {
             // Uh oh, the InCallControlState thinks that Swap *and* Hold
             // should both be available.  This *should* never happen with
@@ -508,17 +559,6 @@ public class InCallTouchUi extends FrameLayout
             Log.w(LOG_TAG, "updateInCallControls: Hold *and* Swap enabled, but can't show both!");
         }
 
-        // CDMA-specific "Merge" button.
-        // This button and its label are totally hidden (rather than just disabled)
-        // when the operation isn't available.
-        boolean showCdmaMerge =
-                (phoneType == Phone.PHONE_TYPE_CDMA) && inCallControlState.canMerge;
-        if (showCdmaMerge) {
-            mCdmaMergeButton.setVisibility(View.VISIBLE);
-            showExtraButtonRow = true;
-        } else {
-            mCdmaMergeButton.setVisibility(View.GONE);
-        }
         if (phoneType == Phone.PHONE_TYPE_CDMA) {
             if (inCallControlState.canSwap && inCallControlState.canMerge) {
                 // Uh oh, the InCallControlState thinks that Swap *and* Merge
@@ -531,24 +571,94 @@ public class InCallTouchUi extends FrameLayout
             }
         }
 
-        // "Manage conference" (used only on GSM devices)
-        // This button and its label are shown or hidden together.
-        if (inCallControlState.manageConferenceVisible) {
-            mManageConferenceButton.setVisibility(View.VISIBLE);
-            showExtraButtonRow = true;
-            mManageConferenceButtonImage.setEnabled(inCallControlState.manageConferenceEnabled);
-        } else {
-            mManageConferenceButton.setVisibility(View.GONE);
-        }
-
         // Finally, update the "extra button row": It's displayed above the
         // "End" button, but only if necessary.  Also, it's never displayed
         // while the dialpad is visible (since it would overlap.)
+        //
+        // The row contains two buttons:
+        //
+        // - "Manage conference" (used only on GSM devices)
+        // - "Merge" button (used only on CDMA devices)
+        //
+        // Note that mExtraButtonRow is ViewStub, which will be inflated for the first time when
+        // any of its buttons becomes visible.
+        final boolean showCdmaMerge =
+                (phoneType == Phone.PHONE_TYPE_CDMA) && inCallControlState.canMerge;
+        final boolean showExtraButtonRow =
+                showCdmaMerge || inCallControlState.manageConferenceVisible;
         if (showExtraButtonRow && !inCallControlState.dialpadVisible) {
+            // This will require the ViewStub inflate itself.
             mExtraButtonRow.setVisibility(View.VISIBLE);
+
+            // Need to set up mCdmaMergeButton and mManageConferenceButton if this is the first
+            // time they're visible.
+            if (mCdmaMergeButton == null) {
+                setupExtraButtons();
+            }
+            mCdmaMergeButton.setVisibility(showCdmaMerge ? View.VISIBLE : View.GONE);
+            if (inCallControlState.manageConferenceVisible) {
+                mManageConferenceButton.setVisibility(View.VISIBLE);
+                mManageConferenceButtonImage.setEnabled(inCallControlState.manageConferenceEnabled);
+            } else {
+                mManageConferenceButton.setVisibility(View.GONE);
+            }
         } else {
             mExtraButtonRow.setVisibility(View.GONE);
         }
+
+        if (DBG) {
+            log("At the end of updateInCallControls().");
+            dumpBottomButtonState();
+        }
+    }
+
+    /**
+     * Set up the buttons that are part of the "extra button row"
+     */
+    private void setupExtraButtons() {
+        // The two "buttons" here (mCdmaMergeButton and mManageConferenceButton)
+        // are actually layouts containing an icon and a text label side-by-side.
+        mCdmaMergeButton = (ViewGroup) mInCallControls.findViewById(R.id.cdmaMergeButton);
+        if (mCdmaMergeButton == null) {
+            Log.wtf(LOG_TAG, "CDMA Merge button is null even after ViewStub being inflated.");
+            return;
+        }
+        mCdmaMergeButton.setOnClickListener(this);
+
+        mManageConferenceButton =
+                (ViewGroup) mInCallControls.findViewById(R.id.manageConferenceButton);
+        mManageConferenceButton.setOnClickListener(this);
+        mManageConferenceButtonImage =
+                (ImageButton) mInCallControls.findViewById(R.id.manageConferenceButtonImage);
+    }
+
+    private void dumpBottomButtonState() {
+        log(" - dialpad: " + getButtonState(mDialpadButton));
+        log(" - speaker: " + getButtonState(mAudioButton));
+        log(" - mute: " + getButtonState(mMuteButton));
+        log(" - hold: " + getButtonState(mHoldButton));
+        log(" - swap: " + getButtonState(mSwapButton));
+        log(" - add: " + getButtonState(mAddButton));
+        log(" - merge: " + getButtonState(mMergeButton));
+        log(" - cdmaMerge: " + getButtonState(mCdmaMergeButton));
+        log(" - swap: " + getButtonState(mSwapButton));
+        log(" - manageConferenceButton: " + getButtonState(mManageConferenceButton));
+    }
+
+    private static String getButtonState(View view) {
+        if (view == null) {
+            return "(null)";
+        }
+        StringBuilder builder = new StringBuilder();
+        builder.append("visibility: " + (view.getVisibility() == View.VISIBLE ? "VISIBLE"
+                : view.getVisibility() == View.INVISIBLE ? "INVISIBLE" : "GONE"));
+        if (view instanceof ImageButton) {
+            builder.append(", enabled: " + ((ImageButton) view).isEnabled());
+        } else if (view instanceof CompoundButton) {
+            builder.append(", enabled: " + ((CompoundButton) view).isEnabled());
+            builder.append(", checked: " + ((CompoundButton) view).isChecked());
+        }
+        return builder.toString();
     }
 
     /**
@@ -580,7 +690,8 @@ public class InCallTouchUi extends FrameLayout
         boolean showMoreIndicator = false;
         //
         // - Foreground icons for the button.  Exactly one of these is enabled:
-        boolean showSpeakerIcon = false;
+        boolean showSpeakerOnIcon = false;
+        boolean showSpeakerOffIcon = false;
         boolean showHandsetIcon = false;
         boolean showBluetoothIcon = false;
 
@@ -598,7 +709,7 @@ public class InCallTouchUi extends FrameLayout
             if (inCallControlState.bluetoothIndicatorOn) {
                 showBluetoothIcon = true;
             } else if (inCallControlState.speakerOn) {
-                showSpeakerIcon = true;
+                showSpeakerOnIcon = true;
             } else {
                 showHandsetIcon = true;
                 // TODO: if a wired headset is plugged in, that takes precedence
@@ -617,7 +728,9 @@ public class InCallTouchUi extends FrameLayout
 
             // Update desired layers:
             showToggleStateIndication = true;
-            showSpeakerIcon = true;
+
+            showSpeakerOnIcon = inCallControlState.speakerOn;
+            showSpeakerOffIcon = !inCallControlState.speakerOn;
         } else {
             if (DBG) log("- updateAudioButton: disabled...");
 
@@ -628,7 +741,7 @@ public class InCallTouchUi extends FrameLayout
 
             // Update desired layers:
             showToggleStateIndication = true;
-            showSpeakerIcon = true;
+            showSpeakerOffIcon = true;
         }
 
         // Finally, update the drawable layers (see btn_compound_audio.xml).
@@ -652,8 +765,11 @@ public class InCallTouchUi extends FrameLayout
         layers.findDrawableByLayerId(R.id.handsetItem)
                 .setAlpha(showHandsetIcon ? VISIBLE : HIDDEN);
 
-        layers.findDrawableByLayerId(R.id.speakerphoneItem)
-                .setAlpha(showSpeakerIcon ? VISIBLE : HIDDEN);
+        layers.findDrawableByLayerId(R.id.speakerphoneOnItem)
+                .setAlpha(showSpeakerOnIcon ? VISIBLE : HIDDEN);
+
+        layers.findDrawableByLayerId(R.id.speakerphoneOffItem)
+                .setAlpha(showSpeakerOffIcon ? VISIBLE : HIDDEN);
     }
 
     /**
@@ -762,6 +878,7 @@ public class InCallTouchUi extends FrameLayout
     }
 
     // PopupMenu.OnMenuItemClickListener implementation; see showAudioModePopup()
+    @Override
     public boolean onMenuItemClick(MenuItem item) {
         if (DBG) log("- onMenuItemClick: " + item);
         if (DBG) log("  id: " + item.getItemId());
@@ -798,6 +915,7 @@ public class InCallTouchUi extends FrameLayout
     // This gets called when the PopupMenu gets dismissed for *any* reason, like
     // the user tapping outside its bounds, or pressing Back, or selecting one
     // of the menu items.
+    @Override
     public void onDismiss(PopupMenu menu) {
         if (DBG) log("- onDismiss: " + menu);
         mAudioModePopupVisible = false;
@@ -814,7 +932,7 @@ public class InCallTouchUi extends FrameLayout
      * actually used.  Specifically:
      *
      *   - If an incoming call is ringing, the button cluster isn't
-     *     visible at all.  (And the MultiWaveView widget is actually
+     *     visible at all.  (And the GlowPadView widget is actually
      *     much taller than the button cluster.)
      *
      *   - If the InCallTouchUi widget's "extra button row" is visible
@@ -845,13 +963,15 @@ public class InCallTouchUi extends FrameLayout
 
 
     //
-    // MultiWaveView.OnTriggerListener implementation
+    // GlowPadView.OnTriggerListener implementation
     //
 
+    @Override
     public void onGrabbed(View v, int handle) {
 
     }
 
+    @Override
     public void onReleased(View v, int handle) {
 
     }
@@ -861,16 +981,15 @@ public class InCallTouchUi extends FrameLayout
      * We get this callback from the incoming call widget
      * when the user triggers an action.
      */
-    public void onTrigger(View v, int whichHandle) {
-        if (DBG) log("onDialTrigger(whichHandle = " + whichHandle + ")...");
+    @Override
+    public void onTrigger(View view, int whichHandle) {
+        if (DBG) log("onTrigger(whichHandle = " + whichHandle + ")...");
 
-        // On any action by the user, hide the widget:
-        hideIncomingCallWidget();
-
-        // ...and also prevent it from reappearing right away.
-        // (This covers up a slow response from the radio for some
-        // actions; see updateState().)
-        mLastIncomingCallActionTime = SystemClock.uptimeMillis();
+        if (mInCallScreen == null) {
+            Log.wtf(LOG_TAG, "onTrigger(" + whichHandle
+                    + ") from incoming-call widget, but null mInCallScreen!");
+            return;
+        }
 
         // The InCallScreen actually implements all of these actions.
         // Each possible action from the incoming call widget corresponds
@@ -878,25 +997,54 @@ public class InCallTouchUi extends FrameLayout
         // click" handler (even though the UI elements aren't actually
         // buttons; see InCallScreen.handleOnscreenButtonClick().)
 
-        if (mInCallScreen == null) {
-            Log.wtf(LOG_TAG, "onTrigger(" + whichHandle
-                    + ") from incoming-call widget, but null mInCallScreen!");
-            return;
-        }
+        mShowInCallControlsDuringHidingAnimation = false;
         switch (whichHandle) {
             case ANSWER_CALL_ID:
                 if (DBG) log("ANSWER_CALL_ID: answer!");
                 mInCallScreen.handleOnscreenButtonClick(R.id.incomingCallAnswer);
+                mShowInCallControlsDuringHidingAnimation = true;
+
+                // ...and also prevent it from reappearing right away.
+                // (This covers up a slow response from the radio for some
+                // actions; see updateState().)
+                mLastIncomingCallActionTime = SystemClock.uptimeMillis();
                 break;
 
             case SEND_SMS_ID:
                 if (DBG) log("SEND_SMS_ID!");
                 mInCallScreen.handleOnscreenButtonClick(R.id.incomingCallRespondViaSms);
+
+                // Watch out: mLastIncomingCallActionTime should not be updated for this case.
+                //
+                // The variable is originally for avoiding a problem caused by delayed phone state
+                // update; RINGING state may remain just after answering/declining an incoming
+                // call, so we need to wait a bit (500ms) until we get the effective phone state.
+                // For this case, we shouldn't rely on that hack.
+                //
+                // When the user selects this case, there are two possibilities, neither of which
+                // should rely on the hack.
+                //
+                // 1. The first possibility is that, the device eventually sends one of canned
+                //    responses per the user's "send" request, and reject the call after sending it.
+                //    At that moment the code introducing the canned responses should handle the
+                //    case separately.
+                //
+                // 2. The second possibility is that, the device will show incoming call widget
+                //    again per the user's "cancel" request, where the incoming call will still
+                //    remain. At that moment the incoming call will keep its RINGING state.
+                //    The remaining phone state should never be ignored by the hack for
+                //    answering/declining calls because the RINGING state is legitimate. If we
+                //    use the hack for answer/decline cases, the user loses the incoming call
+                //    widget, until further screen update occurs afterward, which often results in
+                //    missed calls.
                 break;
 
             case DECLINE_CALL_ID:
                 if (DBG) log("DECLINE_CALL_ID: reject!");
                 mInCallScreen.handleOnscreenButtonClick(R.id.incomingCallReject);
+
+                // Same as "answer" case.
+                mLastIncomingCallActionTime = SystemClock.uptimeMillis();
                 break;
 
             default:
@@ -904,83 +1052,132 @@ public class InCallTouchUi extends FrameLayout
                 break;
         }
 
+        // On any action by the user, hide the widget.
+        //
+        // If requested above (i.e. if mShowInCallControlsDuringHidingAnimation is set to true),
+        // in-call controls will start being shown too.
+        hideIncomingCallWidget();
+
         // Regardless of what action the user did, be sure to clear out
         // the hint text we were displaying while the user was dragging.
         mInCallScreen.updateIncomingCallWidgetHint(0, 0);
+    }
+
+    public void onFinishFinalAnimation() {
+        // Not used
     }
 
     /**
      * Apply an animation to hide the incoming call widget.
      */
     private void hideIncomingCallWidget() {
-        if (DBG) log("hideIncomingCallWidget()...");
+        // if (DBG) log("hideIncomingCallWidget()...");
         if (mIncomingCallWidget.getVisibility() != View.VISIBLE
-                || mIncomingCallWidget.getAnimation() != null) {
+                || mIncomingCallWidgetIsFadingOut) {
             // Widget is already hidden or in the process of being hidden
             return;
         }
+
+        // TODO: remove this once we fixed issue 6603655
+        log("hideIncomingCallWidget()");
+
         // Hide the incoming call screen with a transition
-        AlphaAnimation anim = new AlphaAnimation(1.0f, 0.0f);
-        anim.setDuration(IN_CALL_WIDGET_TRANSITION_TIME);
-        anim.setAnimationListener(new AnimationListener() {
-
-            public void onAnimationStart(Animation animation) {
-
+        mIncomingCallWidgetIsFadingOut = true;
+        ViewPropertyAnimator animator = mIncomingCallWidget.animate();
+        animator.cancel();
+        animator.setDuration(AnimationUtils.ANIMATION_DURATION);
+        animator.setListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationStart(Animator animation) {
+                if (mShowInCallControlsDuringHidingAnimation) {
+                    if (DBG) log("IncomingCallWidget's hiding animation started");
+                    updateInCallControls(mApp.mCM);
+                    mInCallControls.setVisibility(View.VISIBLE);
+                }
             }
-
-            public void onAnimationRepeat(Animation animation) {
-
-            }
-
-            public void onAnimationEnd(Animation animation) {
-                // hide the incoming call UI.
-                mIncomingCallWidget.clearAnimation();
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                if (DBG) log("IncomingCallWidget's hiding animation ended");
+                mIncomingCallWidget.setAlpha(1);
                 mIncomingCallWidget.setVisibility(View.GONE);
+                mIncomingCallWidget.animate().setListener(null);
+                mShowInCallControlsDuringHidingAnimation = false;
+                mIncomingCallWidgetIsFadingOut = false;
+                mIncomingCallWidgetShouldBeReset = true;
+            }
+            @Override
+            public void onAnimationCancel(Animator animation) {
+                mIncomingCallWidget.animate().setListener(null);
+                mShowInCallControlsDuringHidingAnimation = false;
+                mIncomingCallWidgetIsFadingOut = false;
+                mIncomingCallWidgetShouldBeReset = true;
+
+                // Note: the code which reset this animation should be responsible for
+                // alpha and visibility.
             }
         });
-        mIncomingCallWidget.startAnimation(anim);
+        animator.alpha(0f);
     }
 
     /**
      * Shows the incoming call widget and cancels any animation that may be fading it out.
      */
     private void showIncomingCallWidget(Call ringingCall) {
-        if (DBG) log("showIncomingCallWidget()...");
+        // if (DBG) log("showIncomingCallWidget()...");
 
-        Animation anim = mIncomingCallWidget.getAnimation();
-        if (anim != null) {
-            anim.reset();
-            mIncomingCallWidget.clearAnimation();
+        // TODO: remove this once we fixed issue 6603655
+        // TODO: wouldn't be ok to suppress this whole request if the widget is already VISIBLE
+        //       and we don't need to reset it?
+        log("showIncomingCallWidget(). widget visibility: " + mIncomingCallWidget.getVisibility());
+
+        ViewPropertyAnimator animator = mIncomingCallWidget.animate();
+        if (animator != null) {
+            animator.cancel();
         }
+        mIncomingCallWidget.setAlpha(1.0f);
 
-        // Update the MultiWaveView widget's targets based on the state of
+        // Update the GlowPadView widget's targets based on the state of
         // the ringing call.  (Specifically, we need to disable the
         // "respond via SMS" option for certain types of calls, like SIP
         // addresses or numbers with blocked caller-id.)
+        final boolean allowRespondViaSms =
+                RespondViaSmsManager.allowRespondViaSmsForCall(mInCallScreen, ringingCall);
+        final int targetResourceId = allowRespondViaSms
+                ? R.array.incoming_call_widget_3way_targets
+                : R.array.incoming_call_widget_2way_targets;
+        // The widget should be updated only when appropriate; if the previous choice can be reused
+        // for this incoming call, we'll just keep using it. Otherwise we'll see UI glitch
+        // everytime when this method is called during a single incoming call.
+        if (targetResourceId != mIncomingCallWidget.getTargetResourceId()) {
+            if (allowRespondViaSms) {
+                // The GlowPadView widget is allowed to have all 3 choices:
+                // Answer, Decline, and Respond via SMS.
+                mIncomingCallWidget.setTargetResources(targetResourceId);
+                mIncomingCallWidget.setTargetDescriptionsResourceId(
+                        R.array.incoming_call_widget_3way_target_descriptions);
+                mIncomingCallWidget.setDirectionDescriptionsResourceId(
+                        R.array.incoming_call_widget_3way_direction_descriptions);
+            } else {
+                // You only get two choices: Answer or Decline.
+                mIncomingCallWidget.setTargetResources(targetResourceId);
+                mIncomingCallWidget.setTargetDescriptionsResourceId(
+                        R.array.incoming_call_widget_2way_target_descriptions);
+                mIncomingCallWidget.setDirectionDescriptionsResourceId(
+                        R.array.incoming_call_widget_2way_direction_descriptions);
+            }
 
-        boolean allowRespondViaSms = RespondViaSmsManager.allowRespondViaSmsForCall(ringingCall);
-        if (allowRespondViaSms) {
-            // The MultiWaveView widget is allowed to have all 3 choices:
-            // Answer, Decline, and Respond via SMS.
-            mIncomingCallWidget.setTargetResources(R.array.incoming_call_widget_3way_targets);
-            mIncomingCallWidget.setTargetDescriptionsResourceId(
-                    R.array.incoming_call_widget_3way_target_descriptions);
-            mIncomingCallWidget.setDirectionDescriptionsResourceId(
-                    R.array.incoming_call_widget_3way_direction_descriptions);
-        } else {
-            // You only get two choices: Answer or Decline.
-            mIncomingCallWidget.setTargetResources(R.array.incoming_call_widget_2way_targets);
-            mIncomingCallWidget.setTargetDescriptionsResourceId(
-                    R.array.incoming_call_widget_2way_target_descriptions);
-            mIncomingCallWidget.setDirectionDescriptionsResourceId(
-                    R.array.incoming_call_widget_2way_direction_descriptions);
+            // This will be used right after this block.
+            mIncomingCallWidgetShouldBeReset = true;
+        }
+        if (mIncomingCallWidgetShouldBeReset) {
+            // Watch out: be sure to call reset() and setVisibility() *after*
+            // updating the target resources, since otherwise the GlowPadView
+            // widget will make the targets visible initially (even before you
+            // touch the widget.)
+            mIncomingCallWidget.reset(false);
+            mIncomingCallWidgetShouldBeReset = false;
         }
 
-        // Watch out: be sure to call reset() and setVisibility() *after*
-        // updating the target resources, since otherwise the MultiWaveView
-        // widget will make the targets visible initially (even before you
-        // touch the widget.)
-        mIncomingCallWidget.reset(false);
         mIncomingCallWidget.setVisibility(View.VISIBLE);
 
         // Finally, manually trigger a "ping" animation.
@@ -997,7 +1194,7 @@ public class InCallTouchUi extends FrameLayout
         mHandler.sendEmptyMessageDelayed(
                 INCOMING_CALL_WIDGET_PING,
                 // Visual polish: add a small delay here, to make the
-                // MultiWaveView widget visible for a brief moment
+                // GlowPadView widget visible for a brief moment
                 // *before* starting the ping animation.
                 // This value doesn't need to be very precise.
                 250 /* msec */);
@@ -1008,10 +1205,11 @@ public class InCallTouchUi extends FrameLayout
      *
      * In previous releases (where we used a SlidingTab widget) we would
      * display an onscreen hint depending on which "handle" the user was
-     * dragging.  But we now use a MultiWaveView widget, which has only
+     * dragging.  But we now use a GlowPadView widget, which has only
      * one handle, so for now we don't display a hint at all (see the TODO
      * comment below.)
      */
+    @Override
     public void onGrabbedStateChange(View v, int grabbedState) {
         if (mInCallScreen != null) {
             // Look up the hint based on which handle is currently grabbed.
@@ -1020,22 +1218,11 @@ public class InCallTouchUi extends FrameLayout
             // handle means "Answer" and the right handle means "Decline".)
             int hintTextResId, hintColorResId;
             switch (grabbedState) {
-                case MultiWaveView.OnTriggerListener.NO_HANDLE:
-                case MultiWaveView.OnTriggerListener.CENTER_HANDLE:
+                case GlowPadView.OnTriggerListener.NO_HANDLE:
+                case GlowPadView.OnTriggerListener.CENTER_HANDLE:
                     hintTextResId = 0;
                     hintColorResId = 0;
                     break;
-                // TODO: MultiWaveView only has one handle. MultiWaveView could send an event
-                // indicating that a snap (but not release) happened. Could be used to show text
-                // when user hovers over an item.
-                //        case SlidingTab.OnTriggerListener.LEFT_HANDLE:
-                //            hintTextResId = R.string.slide_to_answer;
-                //            hintColorResId = R.color.incall_textConnected;  // green
-                //            break;
-                //        case SlidingTab.OnTriggerListener.RIGHT_HANDLE:
-                //            hintTextResId = R.string.slide_to_decline;
-                //            hintColorResId = R.color.incall_textEnded;  // red
-                //            break;
                 default:
                     Log.e(LOG_TAG, "onGrabbedStateChange: unexpected grabbedState: "
                           + grabbedState);
@@ -1056,7 +1243,7 @@ public class InCallTouchUi extends FrameLayout
     public void onIncomingRing() {
         if (ENABLE_PING_ON_RING_EVENTS) {
             // Each RING from the telephony layer triggers a "ping" animation
-            // of the MultiWaveView widget.  (The intent here is to make the
+            // of the GlowPadView widget.  (The intent here is to make the
             // pinging appear to be synchronized with the ringtone, although
             // that only works for non-looping ringtones.)
             triggerPing();
@@ -1064,11 +1251,11 @@ public class InCallTouchUi extends FrameLayout
     }
 
     /**
-     * Runs a single "ping" animation of the MultiWaveView widget,
-     * or do nothing if the MultiWaveView widget is no longer visible.
+     * Runs a single "ping" animation of the GlowPadView widget,
+     * or do nothing if the GlowPadView widget is no longer visible.
      *
      * Also, if ENABLE_PING_AUTO_REPEAT is true, schedule the next ping as
-     * well (but again, only if the MultiWaveView widget is still visible.)
+     * well (but again, only if the GlowPadView widget is still visible.)
      */
     public void triggerPing() {
         if (DBG) log("triggerPing: mIncomingCallWidget = " + mIncomingCallWidget);
@@ -1081,7 +1268,7 @@ public class InCallTouchUi extends FrameLayout
         }
 
         if (mIncomingCallWidget == null) {
-            // This shouldn't happen; the MultiWaveView widget should
+            // This shouldn't happen; the GlowPadView widget should
             // always be present in our layout file.
             Log.w(LOG_TAG, "- triggerPing: null mIncomingCallWidget!");
             return;
@@ -1121,97 +1308,6 @@ public class InCallTouchUi extends FrameLayout
                                              PING_AUTO_REPEAT_DELAY_MSEC);
         }
     }
-
-    /**
-     * OnTouchListener used to shrink the "hit target" of some onscreen
-     * buttons.
-     */
-    class SmallerHitTargetTouchListener implements View.OnTouchListener {
-        /**
-         * Width of the allowable "hit target" as a percentage of
-         * the total width of this button.
-         */
-        private static final int HIT_TARGET_PERCENT_X = 50;
-
-        /**
-         * Height of the allowable "hit target" as a percentage of
-         * the total height of this button.
-         *
-         * This is larger than HIT_TARGET_PERCENT_X because some of
-         * the onscreen buttons are wide but not very tall and we don't
-         * want to make the vertical hit target *too* small.
-         */
-        private static final int HIT_TARGET_PERCENT_Y = 80;
-
-        // Size (percentage-wise) of the "edge" area that's *not* touch-sensitive.
-        private static final int X_EDGE = (100 - HIT_TARGET_PERCENT_X) / 2;
-        private static final int Y_EDGE = (100 - HIT_TARGET_PERCENT_Y) / 2;
-        // Min/max values (percentage-wise) of the touch-sensitive hit target.
-        private static final int X_HIT_MIN = X_EDGE;
-        private static final int X_HIT_MAX = 100 - X_EDGE;
-        private static final int Y_HIT_MIN = Y_EDGE;
-        private static final int Y_HIT_MAX = 100 - Y_EDGE;
-
-        // True if the most recent DOWN event was a "hit".
-        boolean mDownEventHit;
-
-        /**
-         * Called when a touch event is dispatched to a view. This allows listeners to
-         * get a chance to respond before the target view.
-         *
-         * @return True if the listener has consumed the event, false otherwise.
-         *         (In other words, we return true when the touch is *outside*
-         *         the "smaller hit target", which will prevent the actual
-         *         button from handling these events.)
-         */
-        public boolean onTouch(View v, MotionEvent event) {
-            // if (DBG) log("SmallerHitTargetTouchListener: " + v + ", event " + event);
-
-            if (event.getAction() == MotionEvent.ACTION_DOWN) {
-                // Note that event.getX() and event.getY() are already
-                // translated into the View's coordinates.  (In other words,
-                // "0,0" is a touch on the upper-left-most corner of the view.)
-                int touchX = (int) event.getX();
-                int touchY = (int) event.getY();
-
-                int viewWidth = v.getWidth();
-                int viewHeight = v.getHeight();
-
-                // Touch location as a percentage of the total button width or height.
-                int touchXPercent = (int) ((float) (touchX * 100) / (float) viewWidth);
-                int touchYPercent = (int) ((float) (touchY * 100) / (float) viewHeight);
-                // if (DBG) log("- percentage:  x = " + touchXPercent + ",  y = " + touchYPercent);
-
-                // TODO: user research: add event logging here of the actual
-                // hit location (and button ID), and enable it for dogfooders
-                // for a few days.  That'll give us a good idea of how close
-                // to the center of the button(s) most touch events are, to
-                // help us fine-tune the HIT_TARGET_PERCENT_* constants.
-
-                if (touchXPercent < X_HIT_MIN || touchXPercent > X_HIT_MAX
-                        || touchYPercent < Y_HIT_MIN || touchYPercent > Y_HIT_MAX) {
-                    // Missed!
-                    // if (DBG) log("  -> MISSED!");
-                    mDownEventHit = false;
-                    return true;  // Consume this event; don't let the button see it
-                } else {
-                    // Hit!
-                    // if (DBG) log("  -> HIT!");
-                    mDownEventHit = true;
-                    return false;  // Let this event through to the actual button
-                }
-            } else {
-                // This is a MOVE, UP or CANCEL event.
-                //
-                // We only do the "smaller hit target" check on DOWN events.
-                // For the subsequent MOVE/UP/CANCEL events, we let them
-                // through to the actual button IFF the previous DOWN event
-                // got through to the actual button (i.e. it was a "hit".)
-                return !mDownEventHit;
-            }
-        }
-    }
-
 
     // Debugging / testing code
 

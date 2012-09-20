@@ -29,6 +29,7 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.ServiceManager;
 import android.telephony.NeighboringCellInfo;
+import android.telephony.CellInfo;
 import android.telephony.ServiceState;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
@@ -253,7 +254,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
         }
 
         // PENDING: should we just silently fail if phone is offhook or ringing?
-        Phone.State state = mPhone.getState();
+        Phone.State state = mCM.getState();
         if (state != Phone.State.OFFHOOK && state != Phone.State.RINGING) {
             Intent  intent = new Intent(Intent.ACTION_DIAL, Uri.parse(url));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -396,7 +397,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
      * @see silenceRinger
      */
     private void silenceRingerInternal() {
-        if ((mPhone.getState() == Phone.State.RINGING)
+        if ((mCM.getState() == Phone.State.RINGING)
             && mApp.notifier.isRinging()) {
             // Ringer is actually playing, so silence it.
             if (DBG) log("silenceRingerInternal: silencing...");
@@ -405,15 +406,15 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
     }
 
     public boolean isOffhook() {
-        return (mPhone.getState() == Phone.State.OFFHOOK);
+        return (mCM.getState() == Phone.State.OFFHOOK);
     }
 
     public boolean isRinging() {
-        return (mPhone.getState() == Phone.State.RINGING);
+        return (mCM.getState() == Phone.State.RINGING);
     }
 
     public boolean isIdle() {
-        return (mPhone.getState() == Phone.State.IDLE);
+        return (mCM.getState() == Phone.State.IDLE);
     }
 
     public boolean isSimPinEnabled() {
@@ -583,7 +584,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
     }
 
     public int getCallState() {
-        return DefaultPhoneNotifier.convertCallState(mPhone.getState());
+        return DefaultPhoneNotifier.convertCallState(mCM.getState());
     }
 
     public int getDataState() {
@@ -648,6 +649,22 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
         return (List <NeighboringCellInfo>) cells;
     }
 
+
+    public List<CellInfo> getAllCellInfo() {
+        try {
+            mApp.enforceCallingOrSelfPermission(
+                android.Manifest.permission.ACCESS_FINE_LOCATION, null);
+        } catch (SecurityException e) {
+            // If we have ACCESS_FINE_LOCATION permission, skip the check for ACCESS_COARSE_LOCATION
+            // A failure should throw the SecurityException from ACCESS_COARSE_LOCATION since this
+            // is the weaker precondition
+            mApp.enforceCallingOrSelfPermission(
+                android.Manifest.permission.ACCESS_COARSE_LOCATION, null);
+        }
+
+        // TODO return cell info list got from mPhone
+        return null;
+    }
 
     //
     // Internal helper methods.
@@ -740,40 +757,7 @@ public class PhoneInterfaceManager extends ITelephony.Stub {
      * Returns the network type
      */
     public int getNetworkType() {
-        int radiotech = mPhone.getServiceState().getRadioTechnology();
-        switch(radiotech) {
-            case ServiceState.RADIO_TECHNOLOGY_GPRS:
-                return TelephonyManager.NETWORK_TYPE_GPRS;
-            case ServiceState.RADIO_TECHNOLOGY_EDGE:
-                return TelephonyManager.NETWORK_TYPE_EDGE;
-            case ServiceState.RADIO_TECHNOLOGY_UMTS:
-                return TelephonyManager.NETWORK_TYPE_UMTS;
-            case ServiceState.RADIO_TECHNOLOGY_HSDPA:
-                return TelephonyManager.NETWORK_TYPE_HSDPA;
-            case ServiceState.RADIO_TECHNOLOGY_HSUPA:
-                return TelephonyManager.NETWORK_TYPE_HSUPA;
-            case ServiceState.RADIO_TECHNOLOGY_HSPA:
-                return TelephonyManager.NETWORK_TYPE_HSPA;
-            case ServiceState.RADIO_TECHNOLOGY_IS95A:
-            case ServiceState.RADIO_TECHNOLOGY_IS95B:
-                return TelephonyManager.NETWORK_TYPE_CDMA;
-            case ServiceState.RADIO_TECHNOLOGY_1xRTT:
-                return TelephonyManager.NETWORK_TYPE_1xRTT;
-            case ServiceState.RADIO_TECHNOLOGY_EVDO_0:
-                return TelephonyManager.NETWORK_TYPE_EVDO_0;
-            case ServiceState.RADIO_TECHNOLOGY_EVDO_A:
-                return TelephonyManager.NETWORK_TYPE_EVDO_A;
-            case ServiceState.RADIO_TECHNOLOGY_EVDO_B:
-                return TelephonyManager.NETWORK_TYPE_EVDO_B;
-            case ServiceState.RADIO_TECHNOLOGY_EHRPD:
-                return TelephonyManager.NETWORK_TYPE_EHRPD;
-            case ServiceState.RADIO_TECHNOLOGY_LTE:
-                return TelephonyManager.NETWORK_TYPE_LTE;
-            case ServiceState.RADIO_TECHNOLOGY_HSPAP:
-                return TelephonyManager.NETWORK_TYPE_HSPAP;
-            default:
-                return TelephonyManager.NETWORK_TYPE_UNKNOWN;
-        }
+        return mPhone.getServiceState().getNetworkType();
     }
 
     /**

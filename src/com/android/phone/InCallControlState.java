@@ -23,7 +23,7 @@ import com.android.internal.telephony.Call;
 import com.android.internal.telephony.Connection;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.CallManager;
-
+import com.android.internal.telephony.TelephonyCapabilities;
 
 /**
  * Helper class to keep track of enabledness, visibility, and "on/off"
@@ -119,12 +119,13 @@ public class InCallControlState {
         // "Add call":
         canAddCall = PhoneUtils.okToAddCall(mCM);
 
-        // "End call": always enabled.
-        // We keep this button enabled even in states where it's technically not
-        // needed, like during the brief "Call ended" state, where the phone is
-        // IDLE.  (See InCallScreen.internalHangup() for the handling of that
-        // case.)
-        canEndCall = true;
+        // "End call": always enabled unless the phone is totally idle.
+        // Note that while the phone is ringing, the InCallTouchUi widget isn't
+        // visible at all, so the state of the End button doesn't matter.  However
+        // we *do* still set canEndCall to true in this case, purely to prevent a
+        // UI glitch when the InCallTouchUi widget first appears, immediately after
+        // answering an incoming call.
+        canEndCall = (mCM.hasActiveFgCall() || mCM.hasActiveRingingCall() || mCM.hasActiveBgCall());
 
         // Swap / merge calls
         canSwap = PhoneUtils.okToSwapCalls(mCM);

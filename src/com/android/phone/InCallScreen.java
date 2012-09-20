@@ -17,6 +17,7 @@
 package com.android.phone;
 
 import android.app.Activity;
+import android.app.ActivityOptions;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.ProgressDialog;
@@ -27,8 +28,8 @@ import android.bluetooth.BluetoothProfile;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.DialogInterface.OnCancelListener;
 import android.content.DialogInterface;
+import android.content.DialogInterface.OnCancelListener;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Configuration;
@@ -65,9 +66,9 @@ import com.android.internal.telephony.CallManager;
 import com.android.internal.telephony.Connection;
 import com.android.internal.telephony.MmiCode;
 import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.TelephonyCapabilities;
 import com.android.phone.Constants.CallStatusCode;
 import com.android.phone.InCallUiState.InCallScreenMode;
-import com.android.phone.OtaUtils.CdmaOtaInCallScreenUiState;
 import com.android.phone.OtaUtils.CdmaOtaScreenState;
 
 import java.util.List;
@@ -121,13 +122,14 @@ public class InCallScreen extends Activity
     // "long" value is for calls ended by the remote caller.
     private static final int CALL_ENDED_SHORT_DELAY =  200;  // msec
     private static final int CALL_ENDED_LONG_DELAY = 2000;  // msec
+    private static final int CALL_ENDED_EXTRA_LONG_DELAY = 5000;  // msec
 
     // Amount of time that we display the PAUSE alert Dialog showing the
     // post dial string yet to be send out to the n/w
     private static final int PAUSE_PROMPT_DIALOG_TIMEOUT = 2000;  //msec
 
-    // Amount of time that we display the provider's overlay if applicable.
-    private static final int PROVIDER_OVERLAY_TIMEOUT = 5000;  // msec
+    // Amount of time that we display the provider info if applicable.
+    private static final int PROVIDER_INFO_TIMEOUT = 5000;  // msec
 
     // These are values for the settings of the auto retry mode:
     // 0 = disabled
@@ -154,7 +156,7 @@ public class InCallScreen extends Activity
     private static final int REQUEST_CLOSE_SPC_ERROR_NOTICE = 118;
     private static final int REQUEST_CLOSE_OTA_FAILURE_NOTICE = 119;
     private static final int EVENT_PAUSE_DIALOG_COMPLETE = 120;
-    private static final int EVENT_HIDE_PROVIDER_OVERLAY = 121;  // Time to remove the overlay.
+    private static final int EVENT_HIDE_PROVIDER_INFO = 121;  // Time to remove the info.
     private static final int REQUEST_UPDATE_SCREEN = 122;
     private static final int PHONE_INCOMING_RING = 123;
     private static final int PHONE_NEW_RINGING_CONNECTION = 124;
@@ -200,10 +202,7 @@ public class InCallScreen extends Activity
     private boolean mBluetoothConnectionPending;
     private long mBluetoothConnectionRequestTime;
 
-    // Main in-call UI ViewGroups
-    private ViewGroup mInCallPanel;
-
-    // Main in-call UI elements:
+    /** Main in-call UI elements. */
     private CallCard mCallCard;
 
     // UI controls:
@@ -214,7 +213,6 @@ public class InCallScreen extends Activity
 
     // DTMF Dialer controller and its view:
     private DTMFTwelveKeyDialer mDialer;
-    private DTMFTwelveKeyDialerView mDialerView;
 
     private EditText mWildPromptText;
 
@@ -311,9 +309,11 @@ public class InCallScreen extends Activity
 
                     break;
 
-                case PhoneApp.MMI_INITIATE:
-                    onMMIInitiate((AsyncResult) msg.obj);
-                    break;
+                // TODO: sort out MMI code (probably we should remove this method entirely).
+                // See also MMI handling code in onResume()
+                // case PhoneApp.MMI_INITIATE:
+                // onMMIInitiate((AsyncResult) msg.obj);
+                //    break;
 
                 case PhoneApp.MMI_CANCEL:
                     onMMICancel();
@@ -324,20 +324,7 @@ public class InCallScreen extends Activity
                 // a system dialog in PhoneUtils.displayMMIComplete(), we
                 // should finish the activity here to close the window.
                 case PhoneApp.MMI_COMPLETE:
-                    // Check the code to see if the request is ready to
-                    // finish, this includes any MMI state that is not
-                    // PENDING.
-                    MmiCode mmiCode = (MmiCode) ((AsyncResult) msg.obj).result;
-                    // if phone is a CDMA phone display feature code completed message
-                    int phoneType = mPhone.getPhoneType();
-                    if (phoneType == Phone.PHONE_TYPE_CDMA) {
-                        PhoneUtils.displayMMIComplete(mPhone, mApp, mmiCode, null, null);
-                    } else if (phoneType == Phone.PHONE_TYPE_GSM) {
-                        if (mmiCode.getState() != MmiCode.State.PENDING) {
-                            if (DBG) log("Got MMI_COMPLETE, finishing InCallScreen...");
-                            endInCallScreenSession();
-                        }
-                    }
+                    onMMIComplete((MmiCode) ((AsyncResult) msg.obj).result);
                     break;
 
                 case POST_ON_DIAL_CHARS:
@@ -408,11 +395,12 @@ public class InCallScreen extends Activity
                     }
                     break;
 
-                case EVENT_HIDE_PROVIDER_OVERLAY:
-                    mApp.inCallUiState.providerOverlayVisible = false;
-                    updateProviderOverlay();  // Clear the overlay.
+                case EVENT_HIDE_PROVIDER_INFO:
+                    mApp.inCallUiState.providerInfoVisible = false;
+                    if (mCallCard != null) {
+                        mCallCard.updateState(mCM);
+                    }
                     break;
-
                 case REQUEST_UPDATE_SCREEN:
                     updateScreen();
                     break;
@@ -485,12 +473,6 @@ public class InCallScreen extends Activity
         }
         getWindow().addFlags(flags);
 
-        // Also put the system bar (if present on this device) into
-        // "lights out" mode any time we're the foreground activity.
-        WindowManager.LayoutParams params = getWindow().getAttributes();
-        params.systemUiVisibility = View.SYSTEM_UI_FLAG_LOW_PROFILE;
-        getWindow().setAttributes(params);
-
         setPhone(mApp.phone);  // Sets mPhone
 
         mCM =  mApp.mCM;
@@ -536,15 +518,17 @@ public class InCallScreen extends Activity
     }
 
      private BluetoothProfile.ServiceListener mBluetoothProfileServiceListener =
-        new BluetoothProfile.ServiceListener() {
-        public void onServiceConnected(int profile, BluetoothProfile proxy) {
-            mBluetoothHeadset = (BluetoothHeadset) proxy;
-            if (VDBG) log("- Got BluetoothHeadset: " + mBluetoothHeadset);
-        }
+             new BluetoothProfile.ServiceListener() {
+         @Override
+         public void onServiceConnected(int profile, BluetoothProfile proxy) {
+             mBluetoothHeadset = (BluetoothHeadset) proxy;
+             if (VDBG) log("- Got BluetoothHeadset: " + mBluetoothHeadset);
+         }
 
-        public void onServiceDisconnected(int profile) {
-            mBluetoothHeadset = null;
-        }
+         @Override
+         public void onServiceDisconnected(int profile) {
+             mBluetoothHeadset = null;
+         }
     };
 
     /**
@@ -567,6 +551,11 @@ public class InCallScreen extends Activity
         mIsForegroundActivity = true;
         mIsForegroundActivityForProximity = true;
 
+        // The flag shouldn't be turned on when there are actual phone calls.
+        if (mCM.hasActiveFgCall() || mCM.hasActiveBgCall() || mCM.hasActiveRingingCall()) {
+            mApp.inCallUiState.showAlreadyDisconnectedState = false;
+        }
+
         final InCallUiState inCallUiState = mApp.inCallUiState;
         if (VDBG) inCallUiState.dumpState();
 
@@ -575,9 +564,8 @@ public class InCallScreen extends Activity
         // prevent the device from going to sleep.
         mApp.setIgnoreTouchUserActivity(true);
 
-        // Disable the status bar "window shade" the entire time we're on
-        // the in-call screen.
-        mApp.notificationMgr.statusBarHelper.enableExpandedView(false);
+        updateExpandedViewState();
+
         // ...and update the in-call notification too, since the status bar
         // icon needs to be hidden while we're the foreground activity:
         mApp.notificationMgr.updateInCallNotification();
@@ -593,9 +581,9 @@ public class InCallScreen extends Activity
 
         // Update the onscreen dialpad state to match the InCallUiState.
         if (inCallUiState.showDialpad) {
-            showDialpadInternal(false);  // no "opening" animation
+            openDialpadInternal(false);  // no "opening" animation
         } else {
-            hideDialpadInternal(false);  // no "closing" animation
+            closeDialpadInternal(false);  // no "closing" animation
         }
         //
         // TODO: also need to load inCallUiState.dialpadDigits into the dialpad
@@ -607,9 +595,7 @@ public class InCallScreen extends Activity
         // come to the foreground; it only ever comes up in response to
         // the user selecting the "SMS" option from the incoming call
         // widget.)
-        if (mRespondViaSmsManager != null) {
-            mRespondViaSmsManager.dismissPopup();  // safe even if already dismissed
-        }
+        mRespondViaSmsManager.dismissPopup();  // safe even if already dismissed
 
         // Display an error / diagnostic indication if necessary.
         //
@@ -713,7 +699,7 @@ public class InCallScreen extends Activity
         } else if (TelephonyCapabilities.supportsOtasp(mPhone)) {
             if (inCallUiState.inCallScreenMode == InCallScreenMode.OTA_NORMAL ||
                     inCallUiState.inCallScreenMode == InCallScreenMode.OTA_ENDED) {
-                if (mInCallPanel != null) mInCallPanel.setVisibility(View.GONE);
+                if (mCallCard != null) mCallCard.setVisibility(View.GONE);
                 updateScreen();
                 return;
             }
@@ -722,11 +708,8 @@ public class InCallScreen extends Activity
         // InCallScreen is now active.
         EventLog.writeEvent(EventLogTags.PHONE_UI_ENTER);
 
-        // Update the poke lock and wake lock when we move to
-        // the foreground.
-        //
-        // But we need to do something special if we're coming
-        // to the foreground while an incoming call is ringing:
+        // Coming to the foreground while in an incoming call is ringing.
+        // We need to do something special.
         if (mCM.getState() == Phone.State.RINGING) {
             // If the phone is ringing, we *should* already be holding a
             // full wake lock (which we would have acquired before
@@ -759,6 +742,8 @@ public class InCallScreen extends Activity
             // but let's do this just to be safe:
             mApp.preventScreenOn(false);
         }
+        // Update the poke lock and wake lock when we move to the foreground.
+        // This will be no-op when prox sensor is effective.
         mApp.updateWakeState();
 
         // Restore the mute state if the last mute state change was NOT
@@ -770,6 +755,50 @@ public class InCallScreen extends Activity
         }
 
         Profiler.profileViewCreate(getWindow(), InCallScreen.class.getName());
+
+        // If there's a pending MMI code, we'll show a dialog here.
+        //
+        // Note: previously we had shown the dialog when MMI_INITIATE event's coming
+        // from telephony layer, while right now we don't because the event comes
+        // too early (before in-call screen is prepared).
+        // Now we instead check pending MMI code and show the dialog here.
+        //
+        // This *may* cause some problem, e.g. when the user really quickly starts
+        // MMI sequence and calls an actual phone number before the MMI request
+        // being completed, which is rather rare.
+        //
+        // TODO: streamline this logic and have a UX in a better manner.
+        // Right now syncWithPhoneState() above will return SUCCESS based on
+        // mPhone.getPendingMmiCodes().isEmpty(), while we check it again here.
+        // Also we show pre-populated in-call UI under the dialog, which looks
+        // not great. (issue 5210375, 5545506)
+        // After cleaning them, remove commented-out MMI handling code elsewhere.
+        if (!mPhone.getPendingMmiCodes().isEmpty()) {
+            if (mMmiStartedDialog == null) {
+                MmiCode mmiCode = mPhone.getPendingMmiCodes().get(0);
+                Message message = Message.obtain(mHandler, PhoneApp.MMI_CANCEL);
+                mMmiStartedDialog = PhoneUtils.displayMMIInitiate(this, mmiCode,
+                        message, mMmiStartedDialog);
+                // mInCallScreen needs to receive MMI_COMPLETE/MMI_CANCEL event from telephony,
+                // which will dismiss the entire screen.
+            }
+        }
+
+        // This means the screen is shown even though there's no connection, which only happens
+        // when the phone call has hung up while the screen is turned off at that moment.
+        // We want to show "disconnected" state with photos with appropriate elapsed time for
+        // the finished phone call.
+        if (mApp.inCallUiState.showAlreadyDisconnectedState) {
+            // if (DBG) {
+            log("onResume(): detected \"show already disconnected state\" situation."
+                    + " set up DELAYED_CLEANUP_AFTER_DISCONNECT message with "
+                    + CALL_ENDED_LONG_DELAY + " msec delay.");
+            //}
+            mHandler.removeMessages(DELAYED_CLEANUP_AFTER_DISCONNECT);
+            mHandler.sendEmptyMessageDelayed(DELAYED_CLEANUP_AFTER_DISCONNECT,
+                    CALL_ENDED_LONG_DELAY);
+        }
+
         if (VDBG) log("onResume() done.");
     }
 
@@ -781,15 +810,20 @@ public class InCallScreen extends Activity
         super.onPause();
 
         if (mPowerManager.isScreenOn()) {
+            // Set to false when the screen went background *not* by screen turned off. Probably
+            // the user bailed out of the in-call screen (by pressing BACK, HOME, etc.)
             mIsForegroundActivityForProximity = false;
         }
         mIsForegroundActivity = false;
 
-        // Force a clear of the provider overlay' frame. Since the
-        // overlay is removed using a timed message, it is
+        // Force a clear of the provider info frame. Since the
+        // frame is removed using a timed message, it is
         // possible we missed it if the prev call was interrupted.
-        mApp.inCallUiState.providerOverlayVisible = false;
-        updateProviderOverlay();
+        mApp.inCallUiState.providerInfoVisible = false;
+
+        // "show-already-disconnected-state" should be effective just during the first wake-up.
+        // We should never allow it to stay true after that.
+        mApp.inCallUiState.showAlreadyDisconnectedState = false;
 
         // A safety measure to disable proximity sensor in case call failed
         // and the telephony state did not change.
@@ -832,7 +866,7 @@ public class InCallScreen extends Activity
         // end up causing the sleep request to be ignored.
         if (mHandler.hasMessages(DELAYED_CLEANUP_AFTER_DISCONNECT)
                 && mCM.getState() != Phone.State.RINGING) {
-            log("DELAYED_CLEANUP_AFTER_DISCONNECT detected, moving UI to background.");
+            if (DBG) log("DELAYED_CLEANUP_AFTER_DISCONNECT detected, moving UI to background.");
             endInCallScreenSession();
         }
 
@@ -842,8 +876,8 @@ public class InCallScreen extends Activity
         // sure they won't still be around when we get back here.
         dismissAllDialogs();
 
-        // Re-enable the status bar (which we disabled in onResume().)
-        mApp.notificationMgr.statusBarHelper.enableExpandedView(true);
+        updateExpandedViewState();
+
         // ...and the in-call notification too:
         mApp.notificationMgr.updateInCallNotification();
         // ...and *always* reset the system bar back to its normal state
@@ -875,6 +909,14 @@ public class InCallScreen extends Activity
         // clear the dismiss keyguard flag so we are back to the default state
         // when we next resume
         updateKeyguardPolicy(false);
+
+        // See also PhoneApp#updatePhoneState(), which takes care of all the other release() calls.
+        if (mApp.getUpdateLock().isHeld() && mApp.getPhoneState() == Phone.State.IDLE) {
+            if (DBG) {
+                log("Release UpdateLock on onPause() because there's no active phone call.");
+            }
+            mApp.getUpdateLock().release();
+        }
     }
 
     @Override
@@ -888,6 +930,13 @@ public class InCallScreen extends Activity
         if (DBG) log("onStop: state = " + state);
 
         if (state == Phone.State.IDLE) {
+            if (mRespondViaSmsManager.isShowingPopup()) {
+                // This means that the user has been opening the "Respond via SMS" dialog even
+                // after the incoming call hanging up, and the screen finally went background.
+                // In that case we just close the dialog and exit the whole in-call screen.
+                mRespondViaSmsManager.dismissPopup();
+            }
+
             // when OTA Activation, OTA Success/Failure dialog or OTA SPC
             // failure dialog is running, do not destroy inCallScreen. Because call
             // is already ended and dialog will not get redrawn on slider event.
@@ -927,9 +976,7 @@ public class InCallScreen extends Activity
         if (mInCallTouchUi != null) {
             mInCallTouchUi.setInCallScreenInstance(null);
         }
-        if (mRespondViaSmsManager != null) {
-            mRespondViaSmsManager.setInCallScreenInstance(null);
-        }
+        mRespondViaSmsManager.setInCallScreenInstance(null);
 
         mDialer.clearInCallScreenReference();
         mDialer = null;
@@ -998,7 +1045,9 @@ public class InCallScreen extends Activity
      *        @see finish()
      */
     private void endInCallScreenSession(boolean forceFinish) {
-        log("endInCallScreenSession(" + forceFinish + ")...  phone state = " + mCM.getState());
+        if (DBG) {
+            log("endInCallScreenSession(" + forceFinish + ")...  phone state = " + mCM.getState());
+        }
         if (forceFinish) {
             Log.i(LOG_TAG, "endInCallScreenSession(): FORCING a call to super.finish()!");
             super.finish();  // Call super.finish() rather than our own finish() method,
@@ -1009,10 +1058,19 @@ public class InCallScreen extends Activity
         setInCallScreenMode(InCallScreenMode.UNDEFINED);
     }
 
+    /**
+     * True when this Activity is in foreground (between onResume() and onPause()).
+     */
     /* package */ boolean isForegroundActivity() {
         return mIsForegroundActivity;
     }
 
+    /**
+     * Returns true when the Activity is in foreground (between onResume() and onPause()),
+     * or, is in background due to user's bailing out of the screen, not by screen turning off.
+     *
+     * @see #isForegroundActivity()
+     */
     /* package */ boolean isForegroundActivityForProximity() {
         return mIsForegroundActivityForProximity;
     }
@@ -1029,7 +1087,10 @@ public class InCallScreen extends Activity
         if (!mRegisteredForPhoneStates) {
             mCM.registerForPreciseCallStateChanged(mHandler, PHONE_STATE_CHANGED, null);
             mCM.registerForDisconnect(mHandler, PHONE_DISCONNECT, null);
-            mCM.registerForMmiInitiate(mHandler, PhoneApp.MMI_INITIATE, null);
+            // TODO: sort out MMI code (probably we should remove this method entirely).
+            // See also MMI handling code in onResume()
+            // mCM.registerForMmiInitiate(mHandler, PhoneApp.MMI_INITIATE, null);
+
             // register for the MMI complete message.  Upon completion,
             // PhoneUtils will bring up a system dialog instead of the
             // message display class in PhoneUtils.displayMMIComplete().
@@ -1145,6 +1206,15 @@ public class InCallScreen extends Activity
                 // If SHOW_DIALPAD_EXTRA is specified, that overrides whatever
                 // the previous state of inCallUiState.showDialpad was.
                 mApp.inCallUiState.showDialpad = showDialpad;
+
+                final boolean hasActiveCall = mCM.hasActiveFgCall();
+                final boolean hasHoldingCall = mCM.hasActiveBgCall();
+
+                // There's only one line in use, AND it's on hold, at which we're sure the user
+                // wants to use the dialpad toward the exact line, so un-hold the holding line.
+                if (showDialpad && !hasActiveCall && hasHoldingCall) {
+                    PhoneUtils.switchHoldingAndActive(mCM.getFirstActiveBgCall());
+                }
             }
             // ...and in onResume() we'll update the onscreen dialpad state to
             // match the InCallUiState.
@@ -1212,8 +1282,6 @@ public class InCallScreen extends Activity
         // Have the WindowManager filter out touch events that are "too fat".
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_IGNORE_CHEEK_PRESSES);
 
-        mInCallPanel = (ViewGroup) findViewById(R.id.inCallPanel);
-
         // Initialize the CallCard.
         mCallCard = (CallCard) findViewById(R.id.callCard);
         if (VDBG) log("  - mCallCard = " + mCallCard);
@@ -1229,19 +1297,8 @@ public class InCallScreen extends Activity
         mManageConferenceUtils = new ManageConferenceUtils(this, mCM);
 
         // The DTMF Dialpad.
-        // TODO: Don't inflate this until the first time it's needed.
-        ViewStub stub = (ViewStub)findViewById(R.id.dtmf_twelve_key_dialer_stub);
-        stub.inflate();
-        mDialerView = (DTMFTwelveKeyDialerView) findViewById(R.id.dtmf_twelve_key_dialer_view);
-        if (DBG) log("- Found dialerView: " + mDialerView);
-
-        // Sanity-check that (regardless of the device) at least the
-        // dialer view is present:
-        if (mDialerView == null) {
-            Log.e(LOG_TAG, "onCreate: couldn't find dialerView", new IllegalStateException());
-        }
-        // Finally, create the DTMFTwelveKeyDialer instance.
-        mDialer = new DTMFTwelveKeyDialer(this, mDialerView);
+        ViewStub stub = (ViewStub) findViewById(R.id.dtmf_twelve_key_dialer_stub);
+        mDialer = new DTMFTwelveKeyDialer(this, stub);
         mPowerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
     }
 
@@ -1299,7 +1356,7 @@ public class InCallScreen extends Activity
         // in-call UI:
 
         if (mDialer.isOpened()) {
-            hideDialpadInternal(true);  // do the "closing" animation
+            closeDialpadInternal(true);  // do the "closing" animation
             return;
         }
 
@@ -1617,6 +1674,8 @@ public class InCallScreen extends Activity
             return;
         }
 
+        updateExpandedViewState();
+
         // Update the onscreen UI.
         // We use requestUpdateScreen() here (which posts a handler message)
         // instead of calling updateScreen() directly, which allows us to avoid
@@ -1649,7 +1708,8 @@ public class InCallScreen extends Activity
     private void onDisconnect(AsyncResult r) {
         Connection c = (Connection) r.result;
         Connection.DisconnectCause cause = c.getDisconnectCause();
-        if (DBG) log("onDisconnect: connection '" + c + "', cause = " + cause);
+        if (DBG) log("onDisconnect: connection '" + c + "', cause = " + cause
+                + ", showing screen: " + mApp.isShowingCallScreen());
 
         boolean currentlyIdle = !phoneIsInUse();
         int autoretrySetting = AUTO_RETRY_OFF;
@@ -1743,7 +1803,7 @@ public class InCallScreen extends Activity
         // conference call there's no "call ended" state at all; in that
         // case we blow away any DISCONNECTED connections right now to make sure
         // the UI updates instantly to reflect the current state.]
-        Call call = c.getCall();
+        final Call call = c.getCall();
         if (call != null) {
             // We only care about situation of a single caller
             // disconnecting from a conference call.  In that case, the
@@ -1795,24 +1855,27 @@ public class InCallScreen extends Activity
                  || (cause == Connection.DisconnectCause.INCOMING_REJECTED))
                 && currentlyIdle;
 
+        boolean showingQuickResponseDialog =
+                mRespondViaSmsManager != null && mRespondViaSmsManager.isShowingPopup();
+
         // Note: we also do some special handling for the case when a call
         // disconnects with cause==OUT_OF_SERVICE while making an
         // emergency call from airplane mode.  That's handled by
         // EmergencyCallHelper.onDisconnect().
 
-        // TODO: one more case where we *shouldn't* bail out immediately:
-        // If the disconnect event was from an incoming ringing call, but
-        // the "Respond via SMS" popup is visible onscreen.  (In this
-        // case, we let the popup stay up even after the incoming call
-        // stops ringing, to give people extra time to choose a response.)
-        //
-        // But watch out: if we allow the popup to stay onscreen even
-        // after the incoming call disconnects, then we'll *also* have to
-        // forcibly dismiss it if the InCallScreen gets paused in that
-        // state (like by the user pressing Power or the screen timing
-        // out).
+        if (bailOutImmediately && showingQuickResponseDialog) {
+            if (DBG) log("- onDisconnect: Respond-via-SMS dialog is still being displayed...");
 
-        if (bailOutImmediately) {
+            // Do *not* exit the in-call UI yet!
+            // If the call was an incoming call that was missed *and* the user is using
+            // quick response screen, we keep showing the screen for a moment, assuming the
+            // user wants to reply the call anyway.
+            //
+            // For this case, we will exit the screen when:
+            // - the message is sent (RespondViaSmsManager)
+            // - the message is canceled (RespondViaSmsManager), or
+            // - when the whole in-call UI becomes background (onPause())
+        } else if (bailOutImmediately) {
             if (DBG) log("- onDisconnect: bailOutImmediately...");
 
             // Exit the in-call UI!
@@ -1889,16 +1952,67 @@ public class InCallScreen extends Activity
                 }
             }
 
+            // This is onDisconnect() request from the last phone call; no available call anymore.
+            //
+            // When the in-call UI is in background *because* the screen is turned off (unlike the
+            // other case where the other activity is being shown), we wake up the screen and
+            // show "DISCONNECTED" state once, with appropriate elapsed time. After showing that
+            // we *must* bail out of the screen again, showing screen lock if needed.
+            //
+            // See also comments for isForegroundActivityForProximity()
+            //
+            // TODO: Consider moving this to CallNotifier. This code assumes the InCallScreen
+            // never gets destroyed. For this exact case, it works (since InCallScreen won't be
+            // destroyed), while technically this isn't right; Activity may be destroyed when
+            // in background.
+            if (currentlyIdle && !isForegroundActivity() && isForegroundActivityForProximity()) {
+                log("Force waking up the screen to let users see \"disconnected\" state");
+                if (call != null) {
+                    mCallCard.updateElapsedTimeWidget(call);
+                }
+                // This variable will be kept true until the next InCallScreen#onPause(), which
+                // forcibly turns it off regardless of the situation (for avoiding unnecessary
+                // confusion around this special case).
+                mApp.inCallUiState.showAlreadyDisconnectedState = true;
+
+                // Finally request wake-up..
+                mApp.wakeUpScreen();
+
+                // InCallScreen#onResume() will set DELAYED_CLEANUP_AFTER_DISCONNECT message,
+                // so skip the following section.
+                return;
+            }
+
             // Finally, arrange for delayedCleanupAfterDisconnect() to get
             // called after a short interval (during which we display the
             // "call ended" state.)  At that point, if the
             // Phone is idle, we'll finish out of this activity.
-            int callEndedDisplayDelay =
-                    (cause == Connection.DisconnectCause.LOCAL)
-                    ? CALL_ENDED_SHORT_DELAY : CALL_ENDED_LONG_DELAY;
+            final int callEndedDisplayDelay;
+            switch (cause) {
+                // When the local user hanged up the ongoing call, it is ok to dismiss the screen
+                // soon. In other cases, we show the "hung up" screen longer.
+                //
+                // - For expected reasons we will use CALL_ENDED_LONG_DELAY.
+                // -- when the peer hanged up the call
+                // -- when the local user rejects the incoming call during the other ongoing call
+                // (TODO: there may be other cases which should be in this category)
+                //
+                // - For other unexpected reasons, we will use CALL_ENDED_EXTRA_LONG_DELAY,
+                //   assuming the local user wants to confirm the disconnect reason.
+                case LOCAL:
+                    callEndedDisplayDelay = CALL_ENDED_SHORT_DELAY;
+                    break;
+                case NORMAL:
+                case INCOMING_REJECTED:
+                    callEndedDisplayDelay = CALL_ENDED_LONG_DELAY;
+                    break;
+                default:
+                    callEndedDisplayDelay = CALL_ENDED_EXTRA_LONG_DELAY;
+                    break;
+            }
             mHandler.removeMessages(DELAYED_CLEANUP_AFTER_DISCONNECT);
             mHandler.sendEmptyMessageDelayed(DELAYED_CLEANUP_AFTER_DISCONNECT,
-                                             callEndedDisplayDelay);
+                    callEndedDisplayDelay);
         }
 
         // Remove 3way timer (only meaningful for CDMA)
@@ -1910,6 +2024,8 @@ public class InCallScreen extends Activity
     /**
      * Brings up the "MMI Started" dialog.
      */
+    /* TODO: sort out MMI code (probably we should remove this method entirely). See also
+       MMI handling code in onResume()
     private void onMMIInitiate(AsyncResult r) {
         if (VDBG) log("onMMIInitiate()...  AsyncResult r = " + r);
 
@@ -1935,13 +2051,12 @@ public class InCallScreen extends Activity
         Message message = Message.obtain(mHandler, PhoneApp.MMI_CANCEL);
         mMmiStartedDialog = PhoneUtils.displayMMIInitiate(this, mmiCode,
                                                           message, mMmiStartedDialog);
-    }
+    }*/
 
     /**
      * Handles an MMI_CANCEL event, which is triggered by the button
      * (labeled either "OK" or "Cancel") on the "MMI Started" dialog.
-     * @see onMMIInitiate
-     * @see PhoneUtils.cancelMmiCode
+     * @see PhoneUtils#cancelMmiCode(Phone)
      */
     private void onMMICancel() {
         if (VDBG) log("onMMICancel()...");
@@ -1959,7 +2074,30 @@ public class InCallScreen extends Activity
         // partially-constructed state as soon as the "MMI Started" dialog
         // gets dismissed.  So let's forcibly bail out right now.
         if (DBG) log("onMMICancel: finishing InCallScreen...");
+        dismissAllDialogs();
         endInCallScreenSession();
+    }
+
+    /**
+     * Handles an MMI_COMPLETE event, which is triggered by telephony,
+     * implying MMI
+     */
+    private void onMMIComplete(MmiCode mmiCode) {
+        // Check the code to see if the request is ready to
+        // finish, this includes any MMI state that is not
+        // PENDING.
+
+        // if phone is a CDMA phone display feature code completed message
+        int phoneType = mPhone.getPhoneType();
+        if (phoneType == Phone.PHONE_TYPE_CDMA) {
+            PhoneUtils.displayMMIComplete(mPhone, mApp, mmiCode, null, null);
+        } else if (phoneType == Phone.PHONE_TYPE_GSM) {
+            if (mmiCode.getState() != MmiCode.State.PENDING) {
+                if (DBG) log("Got MMI_COMPLETE, finishing InCallScreen...");
+                dismissAllDialogs();
+                endInCallScreenSession();
+            }
+        }
     }
 
     /**
@@ -2054,18 +2192,21 @@ public class InCallScreen extends Activity
         mWaitPromptDialog = new AlertDialog.Builder(this)
                 .setMessage(buf.toString())
                 .setPositiveButton(R.string.pause_prompt_yes,
-                    new DialogInterface.OnClickListener() {
-                        public void onClick(DialogInterface dialog, int whichButton) {
-                            if (DBG) log("handle WAIT_PROMPT_CONFIRMED, proceed...");
-                            c.proceedAfterWaitChar();
-                        }
-                    })
-                .setNegativeButton(R.string.pause_prompt_no, new DialogInterface.OnClickListener() {
-                        public void onClick(DialogInterface dialog, int whichButton) {
-                            if (DBG) log("handle POST_DIAL_CANCELED!");
-                            c.cancelPostDial();
-                        }
-                    })
+                        new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int whichButton) {
+                                if (DBG) log("handle WAIT_PROMPT_CONFIRMED, proceed...");
+                                c.proceedAfterWaitChar();
+                            }
+                        })
+                .setNegativeButton(R.string.pause_prompt_no,
+                        new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int whichButton) {
+                                if (DBG) log("handle POST_DIAL_CANCELED!");
+                                c.cancelPostDial();
+                            }
+                        })
                 .create();
         mWaitPromptDialog.getWindow().addFlags(
                 WindowManager.LayoutParams.FLAG_BLUR_BEHIND);
@@ -2146,6 +2287,7 @@ public class InCallScreen extends Activity
                 .setPositiveButton(
                         R.string.send_button,
                         new DialogInterface.OnClickListener() {
+                            @Override
                             public void onClick(DialogInterface dialog, int whichButton) {
                                 if (VDBG) log("handle WILD_PROMPT_CHAR_ENTERED, proceed...");
                                 String replacement = null;
@@ -2159,6 +2301,7 @@ public class InCallScreen extends Activity
                         })
                 .setOnCancelListener(
                         new DialogInterface.OnCancelListener() {
+                            @Override
                             public void onCancel(DialogInterface dialog) {
                                 if (VDBG) log("handle POST_DIAL_CANCELED!");
                                 c.cancelPostDial();
@@ -2183,6 +2326,9 @@ public class InCallScreen extends Activity
      * some other thread, or if you just want to "post a request" for the screen
      * to be updated (rather than doing it synchronously), call
      * requestUpdateScreen() instead.
+     *
+     * Right now this method will update UI visibility immediately, with no animation.
+     * TODO: have animate flag here and use it anywhere possible.
      */
     private void updateScreen() {
         if (DBG) log("updateScreen()...");
@@ -2204,18 +2350,21 @@ public class InCallScreen extends Activity
         }
 
         if (inCallScreenMode == InCallScreenMode.OTA_NORMAL) {
-            if (DBG) log("- updateScreen: OTA call state NORMAL...");
+            if (DBG) log("- updateScreen: OTA call state NORMAL (NOT updating in-call UI)...");
+            mCallCard.setVisibility(View.GONE);
             if (mApp.otaUtils != null) {
-                if (DBG) log("- updateScreen: mApp.otaUtils is not null, call otaShowProperScreen");
                 mApp.otaUtils.otaShowProperScreen();
+            } else {
+                Log.w(LOG_TAG, "OtaUtils object is null, not showing any screen for that.");
             }
-            return;
+            return;  // Return without updating in-call UI.
         } else if (inCallScreenMode == InCallScreenMode.OTA_ENDED) {
-            if (DBG) log("- updateScreen: OTA call ended state ...");
+            if (DBG) log("- updateScreen: OTA call ended state (NOT updating in-call UI)...");
+            mCallCard.setVisibility(View.GONE);
             // Wake up the screen when we get notification, good or bad.
             mApp.wakeUpScreen();
             if (mApp.cdmaOtaScreenState.otaScreenState
-                == CdmaOtaScreenState.OtaScreenState.OTA_STATUS_ACTIVATION) {
+                    == CdmaOtaScreenState.OtaScreenState.OTA_STATUS_ACTIVATION) {
                 if (DBG) log("- updateScreen: OTA_STATUS_ACTIVATION");
                 if (mApp.otaUtils != null) {
                     if (DBG) log("- updateScreen: mApp.otaUtils is not null, "
@@ -2229,11 +2378,12 @@ public class InCallScreen extends Activity
                     mApp.otaUtils.otaShowSuccessFailure();
                 }
             }
-            return;
+            return;  // Return without updating in-call UI.
         } else if (inCallScreenMode == InCallScreenMode.MANAGE_CONFERENCE) {
             if (DBG) log("- updateScreen: manage conference mode (NOT updating in-call UI)...");
+            mCallCard.setVisibility(View.GONE);
             updateManageConferencePanelIfNecessary();
-            return;
+            return;  // Return without updating in-call UI.
         } else if (inCallScreenMode == InCallScreenMode.CALL_ENDED) {
             if (DBG) log("- updateScreen: call ended state...");
             // Continue with the rest of updateScreen() as usual, since we do
@@ -2247,8 +2397,28 @@ public class InCallScreen extends Activity
         // space the InCallTouchUi widget needs.
         updateInCallTouchUi();
         mCallCard.updateState(mCM);
-        updateDialpadVisibility();
-        updateProviderOverlay();
+
+        // If an incoming call is ringing, make sure the dialpad is
+        // closed.  (We do this to make sure we're not covering up the
+        // "incoming call" UI.)
+        if (mCM.getState() == Phone.State.RINGING && mDialer.isOpened()) {
+            Log.i(LOG_TAG, "During RINGING state we force hiding dialpad.");
+            closeDialpadInternal(false);  // don't do the "closing" animation
+
+            // Also, clear out the "history" of DTMF digits you may have typed
+            // into the previous call (so you don't see the previous call's
+            // digits if you answer this call and then bring up the dialpad.)
+            //
+            // TODO: it would be more precise to do this when you *answer* the
+            // incoming call, rather than as soon as it starts ringing, but
+            // the InCallScreen doesn't keep enough state right now to notice
+            // that specific transition in onPhoneStateChanged().
+            mDialer.clearDigits();
+        }
+        // Now that we're sure DTMF dialpad is in an appropriate state, reflect
+        // the dialpad state into CallCard
+        updateCallCardVisibilityPerDialerState(false);
+
         updateProgressIndication();
 
         // Forcibly take down all dialog if an incoming call is ringing.
@@ -2338,8 +2508,10 @@ public class InCallScreen extends Activity
         // happening in the background.
         boolean showProgressIndication = mApp.inCallUiState.isProgressIndicationActive();
 
+        boolean showScreenEvenAfterDisconnect = mApp.inCallUiState.showAlreadyDisconnectedState;
+
         if (mCM.hasActiveFgCall() || mCM.hasActiveBgCall() || mCM.hasActiveRingingCall()
-                || hasPendingMmiCodes || showProgressIndication) {
+                || hasPendingMmiCodes || showProgressIndication || showScreenEvenAfterDisconnect) {
             if (VDBG) log("syncWithPhoneState: it's ok to be here; update the screen...");
             updateScreen();
             return SyncWithPhoneStateStatus.SUCCESS;
@@ -2433,7 +2605,7 @@ public class InCallScreen extends Activity
      * nothing, and instead stay here on the InCallScreen.
      */
     private void delayedCleanupAfterDisconnect() {
-        log("delayedCleanupAfterDisconnect()...  Phone state = " + mCM.getState());
+        if (VDBG) log("delayedCleanupAfterDisconnect()...  Phone state = " + mCM.getState());
 
         // Clean up any connections in the DISCONNECTED state.
         //
@@ -2456,7 +2628,7 @@ public class InCallScreen extends Activity
         boolean stayHere = phoneIsInUse() || mApp.inCallUiState.isProgressIndicationActive();
 
         if (stayHere) {
-            log("- delayedCleanupAfterDisconnect: staying on the InCallScreen...");
+            if (DBG) log("- delayedCleanupAfterDisconnect: staying on the InCallScreen...");
         } else {
             // Phone is idle!  We should exit the in-call UI now.
             if (DBG) log("- delayedCleanupAfterDisconnect: phone is idle...");
@@ -2501,13 +2673,14 @@ public class InCallScreen extends Activity
                         && !isPhoneStateRestricted()
                         && PhoneApp.sVoiceCapable) {
                     final Intent intent = mApp.createPhoneEndIntentUsingCallOrigin();
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                    ActivityOptions opts = ActivityOptions.makeCustomAnimation(this,
+                            R.anim.activity_close_enter, R.anim.activity_close_exit);
                     if (VDBG) {
                         log("- Show Call Log (or Dialtacts) after disconnect. Current intent: "
                                 + intent);
                     }
                     try {
-                        startActivity(intent);
+                        startActivity(intent, opts.toBundle());
                     } catch (ActivityNotFoundException e) {
                         // Don't crash if there's somehow no "Call log" at
                         // all on this device.
@@ -2539,11 +2712,15 @@ public class InCallScreen extends Activity
      * This method handles clicks from UI elements that use the
      * InCallScreen itself as their OnClickListener.
      *
-     * Note: Currently this method is used only for a few special buttons: the
-     * mButtonManageConferenceDone "Back to call" button, and the OTASP-specific
-     * buttons managed by OtaUtils.java.  *Most* in-call controls are handled by
-     * the handleOnscreenButtonClick() method, via the InCallTouchUi widget.
+     * Note: Currently this method is used only for a few special buttons:
+     * - the mButtonManageConferenceDone "Back to call" button
+     * - the "dim" effect for the secondary call photo in CallCard as the second "swap" button
+     * - other OTASP-specific buttons managed by OtaUtils.java.
+     *
+     * *Most* in-call controls are handled by the handleOnscreenButtonClick() method, via the
+     * InCallTouchUi widget.
      */
+    @Override
     public void onClick(View view) {
         int id = view.getId();
         if (VDBG) log("onClick(View " + view + ", id " + id + ")...");
@@ -2554,6 +2731,12 @@ public class InCallScreen extends Activity
                 // Hide the Manage Conference panel, return to NORMAL mode.
                 setInCallScreenMode(InCallScreenMode.NORMAL);
                 requestUpdateScreen();
+                break;
+
+            case R.id.dim_effect_for_secondary_photo:
+                if (mInCallControlState.canSwap) {
+                    internalSwapCalls();
+                }
                 break;
 
             default:
@@ -2613,7 +2796,7 @@ public class InCallScreen extends Activity
         // enough.)
 
         // Also, any time we hold or unhold, force the DTMF dialpad to close.
-        hideDialpadInternal(true);  // do the "closing" animation
+        closeDialpadInternal(true);  // do the "closing" animation
     }
 
     /**
@@ -2756,19 +2939,23 @@ public class InCallScreen extends Activity
     }
 
     /**
-     * Handle a click on the "Show/Hide dialpad" button.
+     * Handle a click on the "Open/Close dialpad" button.
+     *
+     * @see DTMFTwelveKeyDialer#openDialer(boolean)
+     * @see DTMFTwelveKeyDialer#closeDialer(boolean)
      */
-    private void onShowHideDialpad() {
-        if (VDBG) log("onShowHideDialpad()...");
+    private void onOpenCloseDialpad() {
+        if (VDBG) log("onOpenCloseDialpad()...");
         if (mDialer.isOpened()) {
-            hideDialpadInternal(true);  // do the "closing" animation
+            closeDialpadInternal(true);  // do the "closing" animation
         } else {
-            showDialpadInternal(true);  // do the "opening" animation
+            openDialpadInternal(true);  // do the "opening" animation
         }
+        mApp.updateProximitySensorMode(mCM.getState());
     }
 
-    // Internal wrapper around DTMFTwelveKeyDialer.openDialer()
-    private void showDialpadInternal(boolean animate) {
+    /** Internal wrapper around {@link DTMFTwelveKeyDialer#openDialer(boolean)} */
+    private void openDialpadInternal(boolean animate) {
         mDialer.openDialer(animate);
         // And update the InCallUiState (so that we'll restore the dialpad
         // to the correct state if we get paused/resumed).
@@ -2776,7 +2963,7 @@ public class InCallScreen extends Activity
     }
 
     // Internal wrapper around DTMFTwelveKeyDialer.closeDialer()
-    private void hideDialpadInternal(boolean animate) {
+    private void closeDialpadInternal(boolean animate) {
         mDialer.closeDialer(animate);
         // And update the InCallUiState (so that we'll restore the dialpad
         // to the correct state if we get paused/resumed).
@@ -2812,7 +2999,7 @@ public class InCallScreen extends Activity
                 internalHangup();
                 break;
             case R.id.dialpadButton:
-                onShowHideDialpad();
+                onOpenCloseDialpad();
                 break;
             case R.id.muteButton:
                 onMuteClick();
@@ -2855,45 +3042,6 @@ public class InCallScreen extends Activity
         // (But this isn't a big deal since updateInCallTouchUi() is pretty
         // cheap anyway...)
         updateInCallTouchUi();
-    }
-
-    /**
-     * Update the network provider's overlay based on the value of
-     * InCallUiState.providerOverlayVisible.
-     * If false the overlay is hidden otherwise it is shown.  A
-     * delayed message is posted to take the overalay down after
-     * PROVIDER_OVERLAY_TIMEOUT. This ensures the user will see the
-     * overlay even if the call setup phase is very short.
-     */
-    private void updateProviderOverlay() {
-        final InCallUiState inCallUiState = mApp.inCallUiState;
-
-        if (VDBG) log("updateProviderOverlay: " + inCallUiState.providerOverlayVisible);
-
-        ViewGroup overlay = (ViewGroup) findViewById(R.id.inCallProviderOverlay);
-
-        if (inCallUiState.providerOverlayVisible) {
-            CharSequence template = getText(R.string.calling_via_template);
-            CharSequence text = TextUtils.expandTemplate(template,
-                                                         inCallUiState.providerLabel,
-                                                         inCallUiState.providerAddress);
-
-            TextView message = (TextView) findViewById(R.id.callingVia);
-            message.setText(text);
-
-            ImageView image = (ImageView) findViewById(R.id.callingViaIcon);
-            image.setImageDrawable(inCallUiState.providerIcon);
-
-            overlay.setVisibility(View.VISIBLE);
-
-            // Remove any zombie messages and then send a message to
-            // self to remove the overlay after some time.
-            mHandler.removeMessages(EVENT_HIDE_PROVIDER_OVERLAY);
-            Message msg = Message.obtain(mHandler, EVENT_HIDE_PROVIDER_OVERLAY);
-            mHandler.sendMessageDelayed(msg, PROVIDER_OVERLAY_TIMEOUT);
-        } else {
-            overlay.setVisibility(View.GONE);
-        }
     }
 
     /**
@@ -3074,7 +3222,7 @@ public class InCallScreen extends Activity
 
         mCallLostDialog = new AlertDialog.Builder(this)
                 .setMessage(R.string.call_lost)
-                .setIcon(android.R.drawable.ic_dialog_alert)
+                .setIconAttribute(android.R.attr.alertDialogIcon)
                 .create();
         mCallLostDialog.show();
     }
@@ -3332,7 +3480,7 @@ public class InCallScreen extends Activity
      * ringing or waiting call.
      */
     private void internalAnswerCall() {
-        log("internalAnswerCall()...");
+        if (DBG) log("internalAnswerCall()...");
         // if (DBG) PhoneUtils.dumpCallState(mPhone);
 
         final boolean hasRingingCall = mCM.hasActiveRingingCall();
@@ -3376,7 +3524,8 @@ public class InCallScreen extends Activity
                 } else {
                     PhoneUtils.answerCall(ringing);
                 }
-            }else if (phoneType == Phone.PHONE_TYPE_GSM){
+            } else if (phoneType == Phone.PHONE_TYPE_GSM) {
+                if (DBG) log("internalAnswerCall: answering (GSM)...");
                 // GSM: this is usually just a wrapper around
                 // PhoneUtils.answerCall(), *but* we also need to do
                 // something special for the "both lines in use" case.
@@ -3449,11 +3598,6 @@ public class InCallScreen extends Activity
     private void internalRespondViaSms() {
         log("internalRespondViaSms()...");
         if (VDBG) PhoneUtils.dumpCallManager();
-
-        if (mRespondViaSmsManager == null) {
-            throw new IllegalStateException(
-                "got internalRespondViaSms(), but mRespondViaSmsManager was never initialized");
-        }
 
         // In the rare case when multiple calls are ringing, the UI policy
         // it to always act on the first ringing call.
@@ -3528,7 +3672,7 @@ public class InCallScreen extends Activity
         // Any time we swap calls, force the DTMF dialpad to close.
         // (We want the regular in-call UI to be visible right now, so the
         // user can clearly see which call is now in the foreground.)
-        hideDialpadInternal(true);  // do the "closing" animation
+        closeDialpadInternal(true);  // do the "closing" animation
 
         // Also, clear out the "history" of DTMF digits you typed, to make
         // sure you don't see digits from call #1 while call #2 is active.
@@ -3599,7 +3743,7 @@ public class InCallScreen extends Activity
                 mManageConferenceUtils.updateManageConferencePanel(connections);
 
                 // The "Manage conference" UI takes up the full main frame,
-                // replacing the inCallPanel and CallCard PopupWindow.
+                // replacing the CallCard PopupWindow.
                 mManageConferenceUtils.setPanelVisible(true);
 
                 // Start the chronometer.
@@ -3614,31 +3758,13 @@ public class InCallScreen extends Activity
                 mManageConferenceUtils.startConferenceTime(
                         SystemClock.elapsedRealtime() - callDuration);
 
-                mInCallPanel.setVisibility(View.GONE);
-
                 // No need to close the dialer here, since the Manage
                 // Conference UI will just cover it up anyway.
 
                 break;
 
             case CALL_ENDED:
-                // Display the CallCard (in the "Call ended" state)
-                // and hide all other UI.
-
-                mManageConferenceUtils.setPanelVisible(false);
-                mManageConferenceUtils.stopConferenceTime();
-
-                // Make sure the CallCard (which is a child of mInCallPanel) is visible.
-                mInCallPanel.setVisibility(View.VISIBLE);
-
-                break;
-
             case NORMAL:
-                if (isDialerOpened()) {
-                    mInCallPanel.setVisibility(View.GONE);
-                } else {
-                    mInCallPanel.setVisibility(View.VISIBLE);
-                }
                 mManageConferenceUtils.setPanelVisible(false);
                 mManageConferenceUtils.stopConferenceTime();
                 break;
@@ -3646,13 +3772,11 @@ public class InCallScreen extends Activity
             case OTA_NORMAL:
                 mApp.otaUtils.setCdmaOtaInCallScreenUiState(
                         OtaUtils.CdmaOtaInCallScreenUiState.State.NORMAL);
-                mInCallPanel.setVisibility(View.GONE);
                 break;
 
             case OTA_ENDED:
                 mApp.otaUtils.setCdmaOtaInCallScreenUiState(
                         OtaUtils.CdmaOtaInCallScreenUiState.State.ENDED);
-                mInCallPanel.setVisibility(View.GONE);
                 break;
 
             case UNDEFINED:
@@ -3692,7 +3816,6 @@ public class InCallScreen extends Activity
                     log("WARNING: Setting mode to UNDEFINED but phone is OFFHOOK,"
                             + " skip cleanOtaScreen.");
                 }
-                mInCallPanel.setVisibility(View.VISIBLE);
                 break;
         }
     }
@@ -3758,55 +3881,46 @@ public class InCallScreen extends Activity
     }
 
     /**
-     * Updates the visibility of the DTMF dialpad (and its onscreen
-     * "handle", if applicable), based on the current state of the phone
-     * and/or the current InCallScreenMode.
+     * Updates {@link #mCallCard}'s visibility state per DTMF dialpad visibility. They
+     * cannot be shown simultaneously and thus we should reflect DTMF dialpad visibility into
+     * another.
+     *
+     * Note: During OTA calls or users' managing conference calls, we should *not* call this method
+     * but manually manage both visibility.
+     *
+     * @see #updateScreen()
      */
-    private void updateDialpadVisibility() {
-        //
-        // (1) The dialpad itself:
-        //
-        // If an incoming call is ringing, make sure the dialpad is
-        // closed.  (We do this to make sure we're not covering up the
-        // "incoming call" UI, and especially to make sure that the "touch
-        // lock" overlay won't appear.)
-        if (mCM.getState() == Phone.State.RINGING) {
-            hideDialpadInternal(false);  // don't do the "closing" animation
-
-            // Also, clear out the "history" of DTMF digits you may have typed
-            // into the previous call (so you don't see the previous call's
-            // digits if you answer this call and then bring up the dialpad.)
-            //
-            // TODO: it would be more precise to do this when you *answer* the
-            // incoming call, rather than as soon as it starts ringing, but
-            // the InCallScreen doesn't keep enough state right now to notice
-            // that specific transition in onPhoneStateChanged().
-            mDialer.clearDigits();
-        }
-
-        //
-        // (2) The main in-call panel (containing the CallCard):
-        //
-        // We need to hide the CallCard (which is a
-        // child of mInCallPanel) while the dialpad is visible.
-        //
-
+    private void updateCallCardVisibilityPerDialerState(boolean animate) {
+        // We need to hide the CallCard while the dialpad is visible.
         if (isDialerOpened()) {
-            if (VDBG) log("- updateDialpadVisibility: dialpad open, hide mInCallPanel...");
-            CallCard.Fade.hide(mInCallPanel, View.GONE);
+            if (VDBG) {
+                log("- updateCallCardVisibilityPerDialerState(animate="
+                        + animate + "): dialpad open, hide mCallCard...");
+            }
+            if (animate) {
+                AnimationUtils.Fade.hide(mCallCard, View.GONE);
+            } else {
+                mCallCard.setVisibility(View.GONE);
+            }
         } else {
-            // Dialpad is dismissed; bring back the CallCard if
-            // it's supposed to be visible.
+            // Dialpad is dismissed; bring back the CallCard if it's supposed to be visible.
             if ((mApp.inCallUiState.inCallScreenMode == InCallScreenMode.NORMAL)
                 || (mApp.inCallUiState.inCallScreenMode == InCallScreenMode.CALL_ENDED)) {
-                if (VDBG) log("- updateDialpadVisibility: dialpad dismissed, show mInCallPanel...");
-                CallCard.Fade.show(mInCallPanel);
+                if (VDBG) {
+                    log("- updateCallCardVisibilityPerDialerState(animate="
+                            + animate + "): dialpad dismissed, show mCallCard...");
+                }
+                if (animate) {
+                    AnimationUtils.Fade.show(mCallCard);
+                } else {
+                    mCallCard.setVisibility(View.VISIBLE);
+                }
             }
         }
     }
 
     /**
-     * @return true if the DTMF dialpad is currently visible.
+     * @see DTMFTwelveKeyDialer#isOpened()
      */
     /* package */ boolean isDialerOpened() {
         return (mDialer != null && mDialer.isOpened());
@@ -3814,16 +3928,16 @@ public class InCallScreen extends Activity
 
     /**
      * Called any time the DTMF dialpad is opened.
-     * @see DTMFTwelveKeyDialer.onDialerOpen()
+     * @see DTMFTwelveKeyDialer#openDialer(boolean)
      */
-    /* package */ void onDialerOpen() {
+    /* package */ void onDialerOpen(boolean animate) {
         if (DBG) log("onDialerOpen()...");
 
         // Update the in-call touch UI.
         updateInCallTouchUi();
 
-        // Update any other onscreen UI elements that depend on the dialpad.
-        updateDialpadVisibility();
+        // Update CallCard UI, which depends on the dialpad.
+        updateCallCardVisibilityPerDialerState(animate);
 
         // This counts as explicit "user activity".
         mApp.pokeUserActivity();
@@ -3840,9 +3954,9 @@ public class InCallScreen extends Activity
 
     /**
      * Called any time the DTMF dialpad is closed.
-     * @see DTMFTwelveKeyDialer.onDialerClose()
+     * @see DTMFTwelveKeyDialer#closeDialer(boolean)
      */
-    /* package */ void onDialerClose() {
+    /* package */ void onDialerClose(boolean animate) {
         if (DBG) log("onDialerClose()...");
 
         // OTA-specific cleanup upon closing the dialpad.
@@ -3859,9 +3973,8 @@ public class InCallScreen extends Activity
         // Update the in-call touch UI.
         updateInCallTouchUi();
 
-        // Update the visibility of the dialpad itself (and any other
-        // onscreen UI elements that depend on it.)
-        updateDialpadVisibility();
+        // Update CallCard UI, which depends on the dialpad.
+        updateCallCardVisibilityPerDialerState(animate);
 
         // This counts as explicit "user activity".
         mApp.pokeUserActivity();
@@ -3870,7 +3983,7 @@ public class InCallScreen extends Activity
     /**
      * Determines when we can dial DTMF tones.
      */
-    private boolean okToDialDTMFTones() {
+    /* package */ boolean okToDialDTMFTones() {
         final boolean hasRingingCall = mCM.hasActiveRingingCall();
         final Call.State fgCallState = mCM.getActiveFgCallState();
 
@@ -3903,9 +4016,9 @@ public class InCallScreen extends Activity
      *      dialpad" onscreen button; see InCallControlState.dialpadEnabled.)
      */
     /* package */ boolean okToShowDialpad() {
-        // The dialpad is available only when it's OK to dial DTMF
-        // tones given the current state of the current call.
-        return okToDialDTMFTones();
+        // Very similar to okToDialDTMFTones(), but allow DIALING here.
+        final Call.State fgCallState = mCM.getActiveFgCallState();
+        return okToDialDTMFTones() || (fgCallState == Call.State.DIALING);
     }
 
     /**
@@ -3957,29 +4070,6 @@ public class InCallScreen extends Activity
         if (DBG) log("requestUpdateScreen()...");
         mHandler.removeMessages(REQUEST_UPDATE_SCREEN);
         mHandler.sendEmptyMessage(REQUEST_UPDATE_SCREEN);
-    }
-
-    /**
-     * @return true if it's OK to display the in-call touch UI, given the
-     * current state of the InCallScreen.
-     */
-    /* package */ boolean okToShowInCallTouchUi() {
-        // Note that this method is concerned only with the internal state
-        // of the InCallScreen.  (The InCallTouchUi widget has separate
-        // logic to make sure it's OK to display the touch UI given the
-        // current telephony state, and that it's allowed on the current
-        // device in the first place.)
-
-        // The touch UI is available in the following InCallScreenModes:
-        // - NORMAL (obviously)
-        // - CALL_ENDED (which is intended to look mostly the same as
-        //               a normal in-call state, even though the in-call
-        //               buttons are mostly disabled)
-        // and is hidden in any of the other modes, like MANAGE_CONFERENCE
-        // or one of the OTA modes (which use totally different UIs.)
-
-        return ((mApp.inCallUiState.inCallScreenMode == InCallScreenMode.NORMAL)
-                || (mApp.inCallUiState.inCallScreenMode == InCallScreenMode.CALL_ENDED));
     }
 
     /**
@@ -4291,7 +4381,7 @@ public class InCallScreen extends Activity
             // (This call has no effect if the UI widgets have already been set up.
             // It only really matters  the very first time that the InCallScreen instance
             // is onResume()d after starting an OTASP call.)
-            mApp.otaUtils.updateUiWidgets(this, mInCallPanel, mInCallTouchUi, mCallCard);
+            mApp.otaUtils.updateUiWidgets(this, mInCallTouchUi, mCallCard);
 
             // Also update the InCallScreenMode based on the cdmaOtaInCallScreenState.
 
@@ -4403,6 +4493,24 @@ public class InCallScreen extends Activity
         }
     }
 
+
+    /**
+     * Used when we need to update buttons outside InCallTouchUi's updateInCallControls() along
+     * with that method being called. CallCard may call this too because it doesn't have
+     * enough information to update buttons inside itself (more specifically, the class cannot
+     * obtain mInCallControllState without some side effect. See also
+     * {@link #getUpdatedInCallControlState()}. We probably don't want a method like
+     * getRawCallControlState() which returns raw intance with no side effect just for this
+     * corner case scenario)
+     *
+     * TODO: need better design for buttons outside InCallTouchUi.
+     */
+    /* package */ void updateButtonStateOutsideInCallTouchUi() {
+        if (mCallCard != null) {
+            mCallCard.setSecondaryCallClickable(mInCallControlState.canSwap);
+        }
+    }
+
     @Override
     public boolean dispatchPopulateAccessibilityEvent(AccessibilityEvent event) {
         super.dispatchPopulateAccessibilityEvent(event);
@@ -4464,14 +4572,20 @@ public class InCallScreen extends Activity
 
     /**
      * Handles a "new ringing connection" event from the telephony layer.
+     *
+     * This event comes in right at the start of the incoming-call sequence,
+     * exactly once per incoming call.
+     *
+     * Watch out: this won't be called if InCallScreen isn't ready yet,
+     * which typically happens for the first incoming phone call (even before
+     * the possible first outgoing call).
      */
     private void onNewRingingConnection() {
         if (DBG) log("onNewRingingConnection()...");
 
-        // This event comes in right at the start of the incoming-call
-        // sequence, exactly once per incoming call.  We use this event to
-        // reset any incoming-call-related UI elements that might have
-        // been left in an inconsistent state after a prior incoming call.
+        // We use this event to reset any incoming-call-related UI elements
+        // that might have been left in an inconsistent state after a prior
+        // incoming call.
         // (Note we do this whether or not we're the foreground activity,
         // since this event comes in *before* we actually get launched to
         // display the incoming-call UI.)
@@ -4484,12 +4598,44 @@ public class InCallScreen extends Activity
         // need it here too, to make sure the popup gets reset in the case
         // where a call-waiting call comes in while the InCallScreen is
         // already in the foreground.)
-        if (mRespondViaSmsManager != null) {
-            mRespondViaSmsManager.dismissPopup();  // safe even if already dismissed
+        mRespondViaSmsManager.dismissPopup();  // safe even if already dismissed
+    }
+
+    /**
+     * Enables or disables the status bar "window shade" based on the current situation.
+     */
+    private void updateExpandedViewState() {
+        if (mIsForegroundActivity) {
+            if (mApp.proximitySensorModeEnabled()) {
+                // We should not enable notification's expanded view on RINGING state.
+                mApp.notificationMgr.statusBarHelper.enableExpandedView(
+                        mCM.getState() != Phone.State.RINGING);
+            } else {
+                // If proximity sensor is unavailable on the device, disable it to avoid false
+                // touches toward notifications.
+                mApp.notificationMgr.statusBarHelper.enableExpandedView(false);
+            }
+        } else {
+            mApp.notificationMgr.statusBarHelper.enableExpandedView(true);
         }
     }
 
     private void log(String msg) {
         Log.d(LOG_TAG, msg);
+    }
+
+    /**
+     * Requests to remove provider info frame after having
+     * {@link #PROVIDER_INFO_TIMEOUT}) msec delay.
+     */
+    /* package */ void requestRemoveProviderInfoWithDelay() {
+        // Remove any zombie messages and then send a message to
+        // self to remove the provider info after some time.
+        mHandler.removeMessages(EVENT_HIDE_PROVIDER_INFO);
+        Message msg = Message.obtain(mHandler, EVENT_HIDE_PROVIDER_INFO);
+        mHandler.sendMessageDelayed(msg, PROVIDER_INFO_TIMEOUT);
+        if (DBG) {
+            log("Requested to remove provider info after " + PROVIDER_INFO_TIMEOUT + " msec.");
+        }
     }
 }

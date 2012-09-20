@@ -21,7 +21,7 @@ public class GsmUmtsAdditionalCallOptions extends
     private CLIRListPreference mCLIRButton;
     private CallWaitingCheckBoxPreference mCWButton;
 
-    private ArrayList<Preference> mPreferences = new ArrayList<Preference> ();
+    private final ArrayList<Preference> mPreferences = new ArrayList<Preference>();
     private int mInitIndex= 0;
 
     @Override

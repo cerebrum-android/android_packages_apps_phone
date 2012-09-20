@@ -15,13 +15,11 @@
 -->
 
 <resources>
-    <!-- Dialer -->
-    <color name="dialer_matchHighlight">#EECF6A</color>
 
     <!-- In-call UI -->
     <color name="incall_callTypeSip">#99CE3F</color> <!-- green -->
     <color name="incall_call_banner_background">#A0000000</color> <!-- semitransparent black -->
-    <color name="incall_call_state_label_background">#8033b5e5</color> <!-- semitransparent blueish grey -->
+    <color name="incall_secondary_info_background">#8033b5e5</color> <!-- semitransparent blueish grey -->
     <color name="incall_call_banner_text_color">#FFFFFF</color> <!-- white -->
 
     <!-- DTMF Dialer -->
@@ -29,4 +27,10 @@
 
     <!-- Color of the theme of the People app -->
     <color name="people_app_theme_color">#33B5E5</color>
+
+    <!-- Put on top of each photo, implying 80% darker than usual. -->
+    <color name="on_hold_dim_effect">#cc000000</color>
+
+    <!-- Used with some smaller texts in manage conference screen. -->
+    <color name="manage_conference_secondary_text_color">#888888</color>
 </resources>

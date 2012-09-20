@@ -18,6 +18,7 @@ package com.android.phone;
 
 import com.android.internal.telephony.Call;
 import com.android.internal.telephony.Connection;
+import com.android.internal.telephony.Phone;
 
 import android.app.ActionBar;
 import android.app.AlertDialog;
@@ -89,6 +90,8 @@ public class RespondViaSmsManager {
     private static final String KEY_CANNED_RESPONSE_PREF_3 = "canned_response_pref_3";
     private static final String KEY_CANNED_RESPONSE_PREF_4 = "canned_response_pref_4";
 
+    private static final String ACTION_SENDTO_NO_CONFIRMATION =
+            "com.android.mms.intent.action.SENDTO_NO_CONFIRMATION";
 
     /**
      * RespondViaSmsManager constructor.
@@ -98,6 +101,12 @@ public class RespondViaSmsManager {
 
     public void setInCallScreenInstance(InCallScreen inCallScreen) {
         mInCallScreen = inCallScreen;
+
+        if (mInCallScreen != null) {
+            // Prefetch shared preferences to make the first canned response lookup faster
+            // (and to prevent StrictMode violation)
+            mInCallScreen.getSharedPreferences(SHARED_PREFERENCES_NAME, Context.MODE_PRIVATE);
+        }
     }
 
     /**
@@ -111,9 +120,6 @@ public class RespondViaSmsManager {
         ListView lv = new ListView(mInCallScreen);
 
         // Refresh the array of "canned responses".
-        // TODO: don't do this here in the UI thread!  (This lookup is very
-        // cheap, but it's still a StrictMode violation.  See the TODO comment
-        // following loadCannedResponses() for more info.)
         mCannedResponses = loadCannedResponses();
 
         // Build the list: start with the canned responses, but manually add
@@ -183,6 +189,10 @@ public class RespondViaSmsManager {
         }
     }
 
+    public boolean isShowingPopup() {
+        return mPopup != null && mPopup.isShowing();
+    }
+
     /**
      * OnItemClickListener for the "Respond via SMS" popup.
      */
@@ -197,6 +207,7 @@ public class RespondViaSmsManager {
         /**
          * Handles the user selecting an item from the popup.
          */
+        @Override
         public void onItemClick(AdapterView<?> parent,  // The ListView
                                 View view,  // The TextView that was clicked
                                 int position,
@@ -245,7 +256,17 @@ public class RespondViaSmsManager {
             // So reject the call now.
             mInCallScreen.hangupRingingCall();
 
-            PhoneApp.getInstance().dismissCallScreen();
+            dismissPopup();
+
+            final Phone.State state = PhoneApp.getInstance().mCM.getState();
+            if (state == Phone.State.IDLE) {
+                // There's no other phone call to interact. Exit the entire in-call screen.
+                PhoneApp.getInstance().dismissCallScreen();
+            } else {
+                // The user is still in the middle of other phone calls, so we should keep the
+                // in-call screen.
+                mInCallScreen.requestUpdateScreen();
+            }
         }
     }
 
@@ -260,28 +281,39 @@ public class RespondViaSmsManager {
          * Handles the user canceling the popup, either by touching
          * outside the popup or by pressing Back.
          */
+        @Override
         public void onCancel(DialogInterface dialog) {
             if (DBG) log("RespondViaSmsCancelListener.onCancel()...");
 
-            // If the user cancels the popup, this presumably means that
-            // they didn't actually mean to bring up the "Respond via SMS"
-            // UI in the first place (and instead want to go back to the
-            // state where they can either answer or reject the call.)
-            // So restart the ringer and bring back the regular incoming
-            // call UI.
+            dismissPopup();
 
-            // This will have no effect if the incoming call isn't still ringing.
-            PhoneApp.getInstance().notifier.restartRinger();
+            final Phone.State state = PhoneApp.getInstance().mCM.getState();
+            if (state == Phone.State.IDLE) {
+                // This means the incoming call is already hung up when the user chooses not to
+                // use "Respond via SMS" feature. Let's just exit the whole in-call screen.
+                PhoneApp.getInstance().dismissCallScreen();
+            } else {
 
-            // We hid the MultiWaveView widget way back in
-            // InCallTouchUi.onTrigger(), when the user first selected
-            // the "SMS" trigger.
-            //
-            // To bring it back, just force the entire InCallScreen to
-            // update itself based on the current telephony state.
-            // (Assuming the incoming call is still ringing, this will
-            // cause the incoming call widget to reappear.)
-            mInCallScreen.requestUpdateScreen();
+                // If the user cancels the popup, this presumably means that
+                // they didn't actually mean to bring up the "Respond via SMS"
+                // UI in the first place (and instead want to go back to the
+                // state where they can either answer or reject the call.)
+                // So restart the ringer and bring back the regular incoming
+                // call UI.
+
+                // This will have no effect if the incoming call isn't still ringing.
+                PhoneApp.getInstance().notifier.restartRinger();
+
+                // We hid the GlowPadView widget way back in
+                // InCallTouchUi.onTrigger(), when the user first selected
+                // the "SMS" trigger.
+                //
+                // To bring it back, just force the entire InCallScreen to
+                // update itself based on the current telephony state.
+                // (Assuming the incoming call is still ringing, this will
+                // cause the incoming call widget to reappear.)
+                mInCallScreen.requestUpdateScreen();
+            }
         }
     }
 
@@ -292,10 +324,7 @@ public class RespondViaSmsManager {
         if (VDBG) log("sendText: number "
                       + phoneNumber + ", message '" + message + "'");
 
-        Uri uri = Uri.fromParts(Constants.SCHEME_SMSTO, phoneNumber, null);
-        Intent intent = new Intent("com.android.mms.intent.action.SENDTO_NO_CONFIRMATION", uri);
-        intent.putExtra(Intent.EXTRA_TEXT, message);
-        mInCallScreen.startService(intent);
+        mInCallScreen.startService(getInstantTextIntent(phoneNumber, message));
     }
 
     /**
@@ -304,32 +333,30 @@ public class RespondViaSmsManager {
     private void launchSmsCompose(String phoneNumber) {
         if (VDBG) log("launchSmsCompose: number " + phoneNumber);
 
-        Uri uri = Uri.fromParts(Constants.SCHEME_SMS, phoneNumber, null);
-        Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+        Intent intent = getInstantTextIntent(phoneNumber, null);
 
         if (VDBG) log("- Launching SMS compose UI: " + intent);
-        mInCallScreen.startActivity(intent);
-
-        // TODO: One open issue here: if the user selects "Custom message"
-        // for an incoming call while the device was locked, and the user
-        // does *not* have a secure keyguard set, we bring up the
-        // non-secure keyguard at this point :-(
-        // Instead, we should immediately go to the SMS compose UI.
-        //
-        // I *believe* the fix is for the SMS compose activity to set the
-        // FLAG_DISMISS_KEYGUARD window flag (which will cause the
-        // keyguard to be dismissed *only* if it is not a secure lock
-        // keyguard.)
-        //
-        // But it there an equivalent way for me to accomplish that here,
-        // without needing to change the SMS app?
-        //
-        // In any case, I'm pretty sure the SMS UI should *not* to set
-        // FLAG_SHOW_WHEN_LOCKED, since we do want the force the user to
-        // enter their lock pattern or PIN at this point if they have a
-        // secure keyguard set.
+        mInCallScreen.startService(intent);
     }
 
+    /**
+     * @param phoneNumber Must not be null.
+     * @param message Can be null. If message is null, the returned Intent will be configured to
+     * launch the SMS compose UI. If non-null, the returned Intent will cause the specified message
+     * to be sent with no interaction from the user.
+     * @return Service Intent for the instant response.
+     */
+    private static Intent getInstantTextIntent(String phoneNumber, String message) {
+        Uri uri = Uri.fromParts(Constants.SCHEME_SMSTO, phoneNumber, null);
+        Intent intent = new Intent(ACTION_SENDTO_NO_CONFIRMATION, uri);
+        if (message != null) {
+            intent.putExtra(Intent.EXTRA_TEXT, message);
+        } else {
+            intent.putExtra("exit_on_sent", true);
+            intent.putExtra("showUI", true);
+        }
+        return intent;
+    }
 
     /**
      * Settings activity under "Call settings" to let you manage the
@@ -382,6 +409,7 @@ public class RespondViaSmsManager {
         }
 
         // Preference.OnPreferenceChangeListener implementation
+        @Override
         public boolean onPreferenceChange(Preference preference, Object newValue) {
             if (DBG) log("onPreferenceChange: key = " + preference.getKey());
             if (VDBG) log("  preference = '" + preference + "'");
@@ -417,7 +445,7 @@ public class RespondViaSmsManager {
      * This method does disk I/O (reading the SharedPreferences file)
      * so don't call it from the main thread.
      *
-     * @see RespondViaSmsManager$Settings
+     * @see RespondViaSmsManager.Settings
      */
     private String[] loadCannedResponses() {
         if (DBG) log("loadCannedResponses()...");
@@ -442,29 +470,6 @@ public class RespondViaSmsManager {
                                        res.getString(R.string.respond_via_sms_canned_response_4));
         return responses;
     }
-    // TODO: Don't call loadCannedResponses() from the UI thread.
-    //
-    // We should either (1) kick off a background task when the call first
-    // starts ringing (probably triggered from the InCallScreen
-    // onNewRingingConnection() method) which would run loadCannedResponses()
-    // and stash the result away in mCannedResponses, or (2) use an
-    // OnSharedPreferenceChangeListener to listen for changes to this
-    // SharedPreferences instance, and use that to kick off the background task.
-    //
-    // In either case:
-    //
-    // - Make sure we recover sanely if mCannedResponses is still null when it's
-    //   actually time to show the popup (i.e. if the background task was too
-    //   slow, or if the background task never got started for some reason)
-    //
-    // - Make sure that all setting and getting of mCannedResponses happens
-    //   inside a synchronized block
-    //
-    // - If we kick off the background task when the call first starts ringing,
-    //   consider delaying that until the incoming-call UI actually comes to the
-    //   foreground; this way we won't steal any CPU away from the caller-id
-    //   query.  Maybe do it from InCallScreen.onResume()?
-    //   Or InCallTouchUi.showIncomingCallWidget()?
 
     /**
      * @return true if the "Respond via SMS" feature should be enabled
@@ -484,7 +489,7 @@ public class RespondViaSmsManager {
      * networks at least), so we still enable this feature even though
      * SMSes to that number will silently fail.
      */
-    public static boolean allowRespondViaSmsForCall(Call ringingCall) {
+    public static boolean allowRespondViaSmsForCall(Context context, Call ringingCall) {
         if (DBG) log("allowRespondViaSmsForCall(" + ringingCall + ")...");
 
         // First some basic sanity checks:
@@ -535,6 +540,12 @@ public class RespondViaSmsManager {
             // The user isn't allowed to see the number in the first
             // place, so obviously we can't let you send an SMS to it.
             Log.i(TAG, "allowRespondViaSmsForCall: PRESENTATION_RESTRICTED.");
+            return false;
+        }
+
+        // Allow the feature only when there's a destination for it.
+        if (context.getPackageManager().resolveService(getInstantTextIntent(number, null) , 0)
+                == null) {
             return false;
         }
 

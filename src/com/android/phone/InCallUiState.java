@@ -334,13 +334,14 @@ public class InCallUiState {
 
 
     //
-    // (4) Optional overlay when a 3rd party "provider" is used.
-    //     @see InCallScreen.updateProviderOverlay()
+    // (4) Optional info when a 3rd party "provider" is used.
+    //     @see InCallScreen#requestRemoveProviderInfoWithDelay()
+    //     @see CallCard#updateCallStateWidgets()
     //
 
-    // TODO: maybe isolate all the provider-overlay-related stuff out to a
+    // TODO: maybe isolate all the provider-related stuff out to a
     //       separate inner class?
-    boolean providerOverlayVisible;
+    boolean providerInfoVisible;
     CharSequence providerLabel;
     Drawable providerIcon;
     Uri providerGatewayUri;
@@ -351,26 +352,26 @@ public class InCallUiState {
      * Set the fields related to the provider support
      * based on the specified intent.
      */
-    public void setProviderOverlayInfo(Intent intent) {
+    public void setProviderInfo(Intent intent) {
         providerLabel = PhoneUtils.getProviderLabel(mContext, intent);
         providerIcon = PhoneUtils.getProviderIcon(mContext, intent);
         providerGatewayUri = PhoneUtils.getProviderGatewayUri(intent);
         providerAddress = PhoneUtils.formatProviderUri(providerGatewayUri);
-        providerOverlayVisible = true;
+        providerInfoVisible = true;
 
         // ...but if any of the "required" fields are missing, completely
         // disable the overlay.
         if (TextUtils.isEmpty(providerLabel) || providerIcon == null ||
             providerGatewayUri == null || TextUtils.isEmpty(providerAddress)) {
-            clearProviderOverlayInfo();
+            clearProviderInfo();
         }
     }
 
     /**
      * Clear all the fields related to the provider support.
      */
-    public void clearProviderOverlayInfo() {
-        providerOverlayVisible = false;
+    public void clearProviderInfo() {
+        providerInfoVisible = false;
         providerLabel = null;
         providerIcon = null;
         providerGatewayUri = null;
@@ -391,6 +392,26 @@ public class InCallUiState {
      */
     String latestActiveCallOrigin;
 
+    /**
+     * Timestamp for "Call origin". This will be used to preserve when the call origin was set.
+     * {@link android.os.SystemClock#elapsedRealtime()} will be used.
+     */
+    long latestActiveCallOriginTimeStamp;
+
+    /**
+     * Flag forcing Phone app to show in-call UI even when there's no phone call and thus Phone
+     * is in IDLE state. This will be turned on only when:
+     *
+     * - the last phone call is hung up, and
+     * - the screen is being turned off in the middle of in-call UI (and thus when the screen being
+     *   turned on in-call UI is expected to be the next foreground activity)
+     *
+     * At that moment whole UI should show "previously disconnected phone call" for a moment and
+     * exit itself. {@link InCallScreen#onPause()} will turn this off and prevent possible weird
+     * cases which may happen with that exceptional case.
+     */
+    boolean showAlreadyDisconnectedState;
+
     //
     // Debugging
     //
@@ -405,14 +426,14 @@ public class InCallUiState {
             log("  - pending call status code: none");
         }
         log("  - progressIndication: " + progressIndication);
-        if (providerOverlayVisible) {
-            log("  - provider overlay VISIBLE: "
+        if (providerInfoVisible) {
+            log("  - provider info VISIBLE: "
                   + providerLabel + " / "
                   + providerIcon  + " / "
                   + providerGatewayUri + " / "
                   + providerAddress);
         } else {
-            log("  - provider overlay: none");
+            log("  - provider info: none");
         }
         log("  - latestActiveCallOrigin: " + latestActiveCallOrigin);
     }
